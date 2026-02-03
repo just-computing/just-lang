@@ -8,8 +8,9 @@ public final class TypeChecker {
     }
 
     public TypeResult typeCheck(AstModule module) {
-        TypeEnvironment env = new TypeEnvironment();
+        TypeEnvironment diags = new TypeEnvironment();
         StructRegistry structs = new StructRegistry();
+        FunctionRegistry functions = new FunctionRegistry();
         boolean success = true;
 
         for (AstItem item : module.items()) {
@@ -20,69 +21,71 @@ public final class TypeChecker {
 
         for (AstItem item : module.items()) {
             if (item instanceof AstFunction fn) {
-                TypeEnvironment functionEnv = new TypeEnvironment();
-                for (AstStmt stmt : fn.body()) {
-                    if (stmt instanceof AstIfStmt ifStmt) {
-                        TypeId condType = inferExpr(ifStmt.condition(), functionEnv, structs, env);
-                        if (condType != TypeId.BOOL) {
-                            env.addError("if condition must be bool");
-                            success = false;
-                        }
-                        TypeEnvironment thenEnv = functionEnv.fork();
-                        if (!checkBlock(ifStmt.thenBranch(), thenEnv, structs, env)) {
-                            success = false;
-                        }
-                        if (ifStmt.elseBranch() != null) {
-                            TypeEnvironment elseEnv = functionEnv.fork();
-                            if (!checkBlock(ifStmt.elseBranch(), elseEnv, structs, env)) {
-                                success = false;
-                            }
-                        }
-                        continue;
-                    }
-                    if (stmt instanceof AstReturnStmt returnStmt) {
-                        if (returnStmt.expr() != null) {
-                            env.addError("return with value is not supported yet");
-                            success = false;
-                        }
-                        continue;
-                    }
-                    if (stmt instanceof AstLetStmt letStmt) {
-                        if (letStmt.initializer() == null) {
-                            env.addError("let without initializer is not supported yet");
-                            success = false;
-                            continue;
-                        }
-                        TypeId exprType = inferExpr(letStmt.initializer(), functionEnv, structs, env);
-                        if (exprType == TypeId.UNKNOWN) {
-                            success = false;
-                            continue;
-                        }
-                        functionEnv.define(letStmt.name(), exprType);
-                        continue;
-                    }
-                    if (stmt instanceof AstExprStmt exprStmt) {
-                        TypeId exprType = inferExpr(exprStmt.expr(), functionEnv, structs, env);
-                        if (exprType == TypeId.UNKNOWN) {
-                            success = false;
-                        }
-                        continue;
-                    }
-                    env.addError("Unsupported statement: " + stmt.getClass().getSimpleName());
+                if (functions.contains(fn.name())) {
+                    diags.addError("Duplicate function: " + fn.name());
+                    success = false;
+                    continue;
+                }
+                if (!fn.params().isEmpty()) {
+                    diags.addError("Function parameters are not supported yet");
+                    success = false;
+                }
+                TypeId returnType = resolveReturnType(fn.returnType(), structs, diags);
+                if (returnType == TypeId.UNKNOWN) {
+                    success = false;
+                }
+                if ("main".equals(fn.name()) && returnType != TypeId.VOID) {
+                    diags.addError("main must return void");
+                    success = false;
+                }
+                functions.register(fn.name(), new FunctionRegistry.FunctionSig(fn.name(), returnType, fn.params().size()));
+            }
+        }
+
+        for (AstItem item : module.items()) {
+            if (item instanceof AstFunction fn) {
+                if (!checkFunction(fn, structs, functions, diags)) {
                     success = false;
                 }
                 continue;
             }
             if (!(item instanceof AstStruct)) {
-                env.addError("Unsupported item: " + item.getClass().getSimpleName());
+                diags.addError("Unsupported item: " + item.getClass().getSimpleName());
                 success = false;
             }
         }
 
-        return new TypeResult(success, env);
+        return new TypeResult(success, diags);
     }
 
-    private boolean checkBlock(List<AstStmt> statements, TypeEnvironment locals, StructRegistry structs, TypeEnvironment diags) {
+    private boolean checkFunction(AstFunction fn, StructRegistry structs, FunctionRegistry functions, TypeEnvironment diags) {
+        boolean success = true;
+        TypeId expectedReturn = resolveReturnType(fn.returnType(), structs, diags);
+        if (expectedReturn == TypeId.UNKNOWN) {
+            return false;
+        }
+
+        TypeEnvironment locals = new TypeEnvironment();
+        if (!checkBlock(fn.body(), locals, structs, functions, expectedReturn, diags)) {
+            success = false;
+        }
+
+        if (expectedReturn != TypeId.VOID && !endsWithReturnValue(fn.body())) {
+            diags.addError("Non-void functions must end with return <expr>");
+            success = false;
+        }
+
+        return success;
+    }
+
+    private boolean checkBlock(
+        List<AstStmt> statements,
+        TypeEnvironment locals,
+        StructRegistry structs,
+        FunctionRegistry functions,
+        TypeId expectedReturn,
+        TypeEnvironment diags
+    ) {
         boolean success = true;
         for (AstStmt stmt : statements) {
             if (stmt instanceof AstLetStmt letStmt) {
@@ -91,8 +94,11 @@ public final class TypeChecker {
                     success = false;
                     continue;
                 }
-                TypeId exprType = inferExpr(letStmt.initializer(), locals, structs, diags);
-                if (exprType == TypeId.UNKNOWN) {
+                TypeId exprType = inferExpr(letStmt.initializer(), locals, structs, functions, diags);
+                if (exprType == TypeId.UNKNOWN || exprType == TypeId.VOID) {
+                    if (exprType == TypeId.VOID) {
+                        diags.addError("let initializer cannot be void");
+                    }
                     success = false;
                     continue;
                 }
@@ -100,31 +106,44 @@ public final class TypeChecker {
                 continue;
             }
             if (stmt instanceof AstExprStmt exprStmt) {
-                TypeId exprType = inferExpr(exprStmt.expr(), locals, structs, diags);
+                TypeId exprType = inferExpr(exprStmt.expr(), locals, structs, functions, diags);
                 if (exprType == TypeId.UNKNOWN) {
                     success = false;
                 }
                 continue;
             }
             if (stmt instanceof AstIfStmt ifStmt) {
-                TypeId condType = inferExpr(ifStmt.condition(), locals, structs, diags);
+                TypeId condType = inferExpr(ifStmt.condition(), locals, structs, functions, diags);
                 if (condType != TypeId.BOOL) {
                     diags.addError("if condition must be bool");
                     success = false;
                 }
-                if (!checkBlock(ifStmt.thenBranch(), locals.fork(), structs, diags)) {
+                if (!checkBlock(ifStmt.thenBranch(), locals.fork(), structs, functions, expectedReturn, diags)) {
                     success = false;
                 }
                 if (ifStmt.elseBranch() != null) {
-                    if (!checkBlock(ifStmt.elseBranch(), locals.fork(), structs, diags)) {
+                    if (!checkBlock(ifStmt.elseBranch(), locals.fork(), structs, functions, expectedReturn, diags)) {
                         success = false;
                     }
                 }
                 continue;
             }
             if (stmt instanceof AstReturnStmt returnStmt) {
-                if (returnStmt.expr() != null) {
-                    diags.addError("return with value is not supported yet");
+                if (expectedReturn == TypeId.VOID) {
+                    if (returnStmt.expr() != null) {
+                        diags.addError("return with value in void function");
+                        success = false;
+                    }
+                    continue;
+                }
+                if (returnStmt.expr() == null) {
+                    diags.addError("return without value in non-void function");
+                    success = false;
+                    continue;
+                }
+                TypeId exprType = inferExpr(returnStmt.expr(), locals, structs, functions, diags);
+                if (!expectedReturn.equals(exprType)) {
+                    diags.addError("return type mismatch: expected " + expectedReturn + " got " + exprType);
                     success = false;
                 }
                 continue;
@@ -135,7 +154,18 @@ public final class TypeChecker {
         return success;
     }
 
-    private TypeId inferExpr(AstExpr expr, TypeEnvironment locals, StructRegistry structs, TypeEnvironment diags) {
+    private boolean endsWithReturnValue(List<AstStmt> statements) {
+        if (statements.isEmpty()) {
+            return false;
+        }
+        AstStmt last = statements.get(statements.size() - 1);
+        if (last instanceof AstReturnStmt returnStmt) {
+            return returnStmt.expr() != null;
+        }
+        return false;
+    }
+
+    private TypeId inferExpr(AstExpr expr, TypeEnvironment locals, StructRegistry structs, FunctionRegistry functions, TypeEnvironment diags) {
         if (expr instanceof AstStringExpr) {
             return TypeId.STRING;
         }
@@ -172,7 +202,7 @@ public final class TypeChecker {
                     diags.addError("Unknown field '" + field.name() + "' on struct " + def.name());
                     return TypeId.UNKNOWN;
                 }
-                TypeId valueType = inferExpr(field.value(), locals, structs, diags);
+                TypeId valueType = inferExpr(field.value(), locals, structs, functions, diags);
                 TypeId fieldType = resolveTypeName(target.type(), structs);
                 if (fieldType == TypeId.UNKNOWN) {
                     diags.addError("Unsupported field type: " + target.type());
@@ -186,7 +216,7 @@ public final class TypeChecker {
             return TypeId.struct(def.name());
         }
         if (expr instanceof AstFieldAccessExpr accessExpr) {
-            TypeId targetType = inferExpr(accessExpr.target(), locals, structs, diags);
+            TypeId targetType = inferExpr(accessExpr.target(), locals, structs, functions, diags);
             if (!targetType.isStruct()) {
                 diags.addError("Field access on non-struct type: " + targetType);
                 return TypeId.UNKNOWN;
@@ -204,38 +234,85 @@ public final class TypeChecker {
             return resolveTypeName(field.type(), structs);
         }
         if (expr instanceof AstBinaryExpr binaryExpr) {
-            return inferBinary(binaryExpr, locals, structs, diags);
+            return inferBinary(binaryExpr, locals, structs, functions, diags);
         }
         if (expr instanceof AstUnaryExpr unaryExpr) {
-            return inferUnary(unaryExpr, locals, structs, diags);
+            return inferUnary(unaryExpr, locals, structs, functions, diags);
         }
         if (expr instanceof AstCallExpr callExpr) {
-            return inferCall(callExpr, locals, structs, diags);
+            return inferCall(callExpr, locals, structs, functions, diags);
+        }
+        if (expr instanceof AstIfExpr ifExpr) {
+            TypeId condType = inferExpr(ifExpr.condition(), locals, structs, functions, diags);
+            if (condType != TypeId.BOOL) {
+                diags.addError("if expression condition must be bool");
+                return TypeId.UNKNOWN;
+            }
+            TypeId thenType = inferExpr(ifExpr.thenExpr(), locals, structs, functions, diags);
+            TypeId elseType = inferExpr(ifExpr.elseExpr(), locals, structs, functions, diags);
+            if (thenType == TypeId.UNKNOWN || elseType == TypeId.UNKNOWN) {
+                return TypeId.UNKNOWN;
+            }
+            if (!thenType.equals(elseType)) {
+                diags.addError("if expression branches must match: " + thenType + " vs " + elseType);
+                return TypeId.UNKNOWN;
+            }
+            if (thenType == TypeId.VOID) {
+                diags.addError("if expression cannot be void");
+                return TypeId.UNKNOWN;
+            }
+            return thenType;
+        }
+        if (expr instanceof AstPathExpr pathExpr) {
+            diags.addError("Unsupported path expression: " + String.join("::", pathExpr.segments()));
+            return TypeId.UNKNOWN;
         }
         diags.addError("Unsupported expression: " + expr.getClass().getSimpleName());
         return TypeId.UNKNOWN;
     }
 
-    private TypeId inferCall(AstCallExpr callExpr, TypeEnvironment locals, StructRegistry structs, TypeEnvironment diags) {
-        if (!isPrintCall(callExpr)) {
-            diags.addError("Unsupported call: " + String.join("::", callExpr.callee()));
+    private TypeId inferCall(AstCallExpr callExpr, TypeEnvironment locals, StructRegistry structs, FunctionRegistry functions, TypeEnvironment diags) {
+        if (isPrintCall(callExpr)) {
+            if (callExpr.args().size() != 1) {
+                diags.addError("print expects exactly one argument");
+                return TypeId.UNKNOWN;
+            }
+            TypeId argType = inferExpr(callExpr.args().get(0), locals, structs, functions, diags);
+            if (!argType.isPrintable()) {
+                diags.addError("print does not support type: " + argType);
+                return TypeId.UNKNOWN;
+            }
+            return TypeId.VOID;
+        }
+
+        if (callExpr.callee().size() != 1) {
+            diags.addError("Only direct function calls are supported");
             return TypeId.UNKNOWN;
         }
-        if (callExpr.args().size() != 1) {
-            diags.addError("print expects exactly one argument");
+
+        String name = callExpr.callee().get(0);
+        FunctionRegistry.FunctionSig sig = functions.find(name);
+        if (sig == null) {
+            diags.addError("Unknown function: " + name);
             return TypeId.UNKNOWN;
         }
-        TypeId argType = inferExpr(callExpr.args().get(0), locals, structs, diags);
-        if (!argType.isPrintable()) {
-            diags.addError("print does not support type: " + argType);
+
+        if (sig.paramCount() != callExpr.args().size()) {
+            diags.addError("Function '" + name + "' expects " + sig.paramCount() + " arguments");
+        }
+        for (AstExpr arg : callExpr.args()) {
+            inferExpr(arg, locals, structs, functions, diags);
+        }
+        if (sig.paramCount() > 0) {
+            diags.addError("Function parameters are not supported yet");
             return TypeId.UNKNOWN;
         }
-        return TypeId.VOID;
+        return sig.returnType();
     }
 
-    private TypeId inferBinary(AstBinaryExpr expr, TypeEnvironment locals, StructRegistry structs, TypeEnvironment diags) {
-        TypeId left = inferExpr(expr.left(), locals, structs, diags);
-        TypeId right = inferExpr(expr.right(), locals, structs, diags);
+    private TypeId inferBinary(AstBinaryExpr expr, TypeEnvironment locals, StructRegistry structs, FunctionRegistry functions, TypeEnvironment diags) {
+        TypeId left = inferExpr(expr.left(), locals, structs, functions, diags);
+        TypeId right = inferExpr(expr.right(), locals, structs, functions, diags);
         String op = expr.operator();
 
         if ("+".equals(op) || "-".equals(op) || "*".equals(op) || "/".equals(op)) {
@@ -274,8 +351,8 @@ public final class TypeChecker {
         return TypeId.UNKNOWN;
     }
 
-    private TypeId inferUnary(AstUnaryExpr expr, TypeEnvironment locals, StructRegistry structs, TypeEnvironment diags) {
-        TypeId right = inferExpr(expr.expr(), locals, structs, diags);
+    private TypeId inferUnary(AstUnaryExpr expr, TypeEnvironment locals, StructRegistry structs, FunctionRegistry functions, TypeEnvironment diags) {
+        TypeId right = inferExpr(expr.expr(), locals, structs, functions, diags);
         if ("!".equals(expr.operator())) {
             if (right == TypeId.BOOL) {
                 return TypeId.BOOL;
@@ -292,6 +369,17 @@ public final class TypeChecker {
         }
         diags.addError("Unsupported unary operator: " + expr.operator());
         return TypeId.UNKNOWN;
+    }
+
+    private TypeId resolveReturnType(String name, StructRegistry structs, TypeEnvironment diags) {
+        if (name == null) {
+            return TypeId.VOID;
+        }
+        TypeId type = resolveTypeName(name, structs);
+        if (type == TypeId.UNKNOWN) {
+            diags.addError("Unknown type: " + name);
+        }
+        return type;
     }
 
     private TypeId resolveTypeName(String name, StructRegistry structs) {

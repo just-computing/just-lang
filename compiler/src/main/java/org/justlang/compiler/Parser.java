@@ -38,8 +38,12 @@ public final class Parser {
             } while (matchSymbol(","));
         }
         expectSymbol(")");
+        String returnType = null;
+        if (matchSymbol("->")) {
+            returnType = parseTypeName();
+        }
         List<AstStmt> body = parseBlock();
-        return new AstFunction(name.lexeme(), params, body);
+        return new AstFunction(name.lexeme(), params, returnType, body);
     }
 
     private AstStmt parseStatement() {
@@ -192,6 +196,9 @@ public final class Parser {
     }
 
     private AstExpr parsePrimary() {
+        if (matchKeyword("if")) {
+            return parseIfExpr();
+        }
         if (matchKeyword("true")) {
             return new AstBoolExpr(true);
         }
@@ -260,6 +267,23 @@ public final class Parser {
             elseBranch = parseBlock();
         }
         return new AstIfStmt(condition, thenBranch, elseBranch);
+    }
+
+    private AstExpr parseIfExpr() {
+        AstExpr condition = parseExpr();
+        AstExpr thenExpr = parseBlockExpr();
+        if (!matchKeyword("else")) {
+            throw error(peek(), "if expression requires else");
+        }
+        AstExpr elseExpr = parseBlockExpr();
+        return new AstIfExpr(condition, thenExpr, elseExpr);
+    }
+
+    private AstExpr parseBlockExpr() {
+        expectSymbol("{");
+        AstExpr expr = parseExpr();
+        expectSymbol("}");
+        return expr;
     }
 
     private AstStmt parseReturn() {

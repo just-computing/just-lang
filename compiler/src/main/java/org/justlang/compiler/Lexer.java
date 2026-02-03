@@ -121,6 +121,8 @@ public final class Lexer {
                     char next = source.charAt(index + 1);
                     if ((c == '=' || c == '!' || c == '<' || c == '>') && next == '=') {
                         symbol = "" + c + next;
+                    } else if (c == '-' && next == '>') {
+                        symbol = "->";
                     } else if (c == '&' && next == '&') {
                         symbol = "&&";
                     } else if (c == '|' && next == '|') {

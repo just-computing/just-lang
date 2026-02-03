@@ -24,6 +24,7 @@ public final class TypeId {
             case "String", "std::String" -> STRING;
             case "i32", "int" -> INT;
             case "bool" -> BOOL;
+            case "void" -> VOID;
             default -> UNKNOWN;
         };
     }
