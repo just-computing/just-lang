@@ -11,7 +11,13 @@ public final class CheckCommand implements Command {
 
     @Override
     public int run() {
-        System.err.println("check is not implemented yet for " + inputPath);
-        return 2;
+        ProjectLoader loader = new ProjectLoader();
+        ProjectConfig config = loader.load(inputPath);
+        CompilerService compilerService = new CompilerService();
+        var result = compilerService.check(config);
+        for (var diagnostic : result.diagnostics()) {
+            System.err.println(diagnostic.message());
+        }
+        return result.success() ? 0 : 1;
     }
 }

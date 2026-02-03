@@ -23,6 +23,10 @@ public final class ArgsParser {
             return parseCheck(args);
         }
 
+        if ("fmt".equals(command)) {
+            return parseFmt(args);
+        }
+
         return HelpCommand.usage("Unknown command: " + command);
     }
 
@@ -111,5 +115,16 @@ public final class ArgsParser {
             return new JargoRunCommand(java.nio.file.Path.of(System.getProperty("user.dir")));
         }
         return HelpCommand.usage("Unknown jargo subcommand: " + subcommand);
+    }
+
+    private Command parseFmt(String[] args) {
+        if (args.length < 2) {
+            return HelpCommand.usage("Missing input file or directory for fmt.");
+        }
+        if (args.length > 2) {
+            return HelpCommand.usage("Unexpected arguments for fmt.");
+        }
+        java.nio.file.Path inputPath = PathResolver.resolveInput(args[1]);
+        return new FmtCommand(inputPath);
     }
 }

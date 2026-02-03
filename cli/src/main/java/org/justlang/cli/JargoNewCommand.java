@@ -22,7 +22,7 @@ public final class JargoNewCommand implements Command {
         try {
             Files.createDirectories(srcDir);
             if (!Files.exists(manifest)) {
-                Files.writeString(manifest, "name = \"" + name + "\"\n");
+                Files.writeString(manifest, "name = \"" + name + "\"\nmain = \"src/main.just\"\n");
             }
             if (!Files.exists(mainFile)) {
                 Files.writeString(mainFile, "fn main() {\n    std::print(\"hello from " + name + "\");\n}\n");

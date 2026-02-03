@@ -5,5 +5,6 @@ struct Point {
 
 fn main() {
     let p = Point { x: 1, y: 2 };
+    std::print(p);
     std::print(p.x);
 }

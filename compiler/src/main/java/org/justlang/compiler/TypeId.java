@@ -29,7 +29,7 @@ public final class TypeId {
     }
 
     public boolean isPrintable() {
-        return this == STRING || this == INT || this == BOOL;
+        return this == STRING || this == INT || this == BOOL || struct;
     }
 
     public boolean isStruct() {
@@ -43,5 +43,21 @@ public final class TypeId {
     @Override
     public String toString() {
         return name;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof TypeId that)) {
+            return false;
+        }
+        return this.struct == that.struct && this.name.equals(that.name);
+    }
+
+    @Override
+    public int hashCode() {
+        return name.hashCode() * 31 + (struct ? 1 : 0);
     }
 }

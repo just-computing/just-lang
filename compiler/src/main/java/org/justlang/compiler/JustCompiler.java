@@ -52,6 +52,14 @@ public final class JustCompiler {
             return new CompileResult(false, diagnostics);
         }
 
+        if (!request.emitJar()) {
+            diagnostics.add(new Diagnostic(
+                "Checked " + sources.size() + " source file(s).",
+                inputPath
+            ));
+            return new CompileResult(true, diagnostics);
+        }
+
         Codegen codegen = new Codegen();
         java.util.List<ClassFile> classFiles;
         try {

@@ -12,7 +12,9 @@ public final class Lexer {
         "return",
         "struct",
         "true",
-        "false"
+        "false",
+        "if",
+        "else"
     );
 
     public List<Token> lex(SourceFile sourceFile) {
@@ -112,10 +114,28 @@ public final class Lexer {
                 continue;
             }
 
-            if (isSymbolChar(c)) {
-                tokens.add(new Token(Token.TokenKind.SYMBOL, java.lang.String.valueOf(c), line, column));
-                index++;
-                column++;
+            if (isSymbolStart(c)) {
+                int startColumn = column;
+                String symbol = null;
+                if (index + 1 < source.length()) {
+                    char next = source.charAt(index + 1);
+                    if ((c == '=' || c == '!' || c == '<' || c == '>') && next == '=') {
+                        symbol = "" + c + next;
+                    } else if (c == '&' && next == '&') {
+                        symbol = "&&";
+                    } else if (c == '|' && next == '|') {
+                        symbol = "||";
+                    }
+                }
+                if (symbol != null) {
+                    tokens.add(new Token(Token.TokenKind.SYMBOL, symbol, line, startColumn));
+                    index += 2;
+                    column += 2;
+                } else {
+                    tokens.add(new Token(Token.TokenKind.SYMBOL, java.lang.String.valueOf(c), line, startColumn));
+                    index++;
+                    column++;
+                }
                 continue;
             }
 
@@ -134,7 +154,7 @@ public final class Lexer {
         return Character.isLetterOrDigit(c) || c == '_';
     }
 
-    private static boolean isSymbolChar(char c) {
-        return "(){}[],;=:+-*/&<>.".indexOf(c) >= 0;
+    private static boolean isSymbolStart(char c) {
+        return "(){}[],;=:+-*/&<>.!|".indexOf(c) >= 0;
     }
 }

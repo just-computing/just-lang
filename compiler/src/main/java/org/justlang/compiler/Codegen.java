@@ -2,9 +2,13 @@ package org.justlang.compiler;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
@@ -53,6 +57,7 @@ public final class Codegen {
         }
 
         emitStructConstructor(writer, layout);
+        emitStructToString(writer, layout);
         writer.visitEnd();
         return new ClassFile(layout.internalName(), writer.toByteArray());
     }
@@ -86,6 +91,39 @@ public final class Codegen {
         mv.visitEnd();
     }
 
+    private void emitStructToString(ClassWriter writer, StructLayout layout) {
+        MethodVisitor mv = writer.visitMethod(Opcodes.ACC_PUBLIC, "toString", "()Ljava/lang/String;", null, null);
+        mv.visitCode();
+
+        mv.visitTypeInsn(Opcodes.NEW, "java/lang/StringBuilder");
+        mv.visitInsn(Opcodes.DUP);
+        mv.visitLdcInsn(layout.name() + "{");
+        mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "(Ljava/lang/String;)V", false);
+
+        int index = 0;
+        for (FieldInfo field : layout.fields()) {
+            if (index > 0) {
+                mv.visitLdcInsn(", ");
+                mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
+            }
+            mv.visitLdcInsn(field.name() + "=");
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
+
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitFieldInsn(Opcodes.GETFIELD, layout.internalName(), field.name(), field.descriptor());
+
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "append", field.appendDescriptor(), false);
+            index++;
+        }
+
+        mv.visitLdcInsn("}");
+        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
+        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "toString", "()Ljava/lang/String;", false);
+        mv.visitInsn(Opcodes.ARETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+    }
+
     private void emitMainMethod(ClassWriter writer, AstFunction main) {
         if (!main.params().isEmpty()) {
             throw new IllegalStateException("main() parameters are not supported yet");
@@ -100,21 +138,33 @@ public final class Codegen {
         );
         mv.visitCode();
 
-        Map<String, Local> locals = new HashMap<>();
-        int nextLocal = 1;
+        LocalState locals = new LocalState();
+        emitBlock(mv, main.body(), locals);
 
-        for (AstStmt stmt : main.body()) {
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+    }
+
+    private void emitBlock(MethodVisitor mv, List<AstStmt> statements, LocalState locals) {
+        for (AstStmt stmt : statements) {
+            if (stmt instanceof AstIfStmt ifStmt) {
+                emitIf(mv, ifStmt, locals);
+                continue;
+            }
+            if (stmt instanceof AstReturnStmt returnStmt) {
+                emitReturn(mv, returnStmt, locals);
+                continue;
+            }
             if (stmt instanceof AstLetStmt letStmt) {
                 if (letStmt.initializer() == null) {
                     throw new IllegalStateException("let without initializer is not supported");
                 }
                 ExprValue value = emitExpr(mv, letStmt.initializer(), locals);
-                int slot = nextLocal++;
-                locals.put(letStmt.name(), new Local(value.kind(), slot, value.structName()));
+                int slot = locals.allocate(letStmt.name(), value.kind(), value.structName());
                 storeLocal(mv, value.kind(), slot);
                 continue;
             }
-
             if (stmt instanceof AstExprStmt exprStmt) {
                 ExprValue value = emitExpr(mv, exprStmt.expr(), locals);
                 if (value.kind() != ValueKind.VOID) {
@@ -122,16 +172,36 @@ public final class Codegen {
                 }
                 continue;
             }
-
             throw new IllegalStateException("Unsupported statement: " + stmt.getClass().getSimpleName());
         }
-
-        mv.visitInsn(Opcodes.RETURN);
-        mv.visitMaxs(0, 0);
-        mv.visitEnd();
     }
 
-    private ExprValue emitExpr(MethodVisitor mv, AstExpr expr, Map<String, Local> locals) {
+    private void emitIf(MethodVisitor mv, AstIfStmt ifStmt, LocalState locals) {
+        ExprValue condition = emitExpr(mv, ifStmt.condition(), locals);
+        if (condition.kind() != ValueKind.BOOL) {
+            throw new IllegalStateException("if condition must be bool");
+        }
+        Label elseLabel = new Label();
+        Label endLabel = new Label();
+        mv.visitJumpInsn(Opcodes.IFEQ, elseLabel);
+        emitBlock(mv, ifStmt.thenBranch(), locals.fork());
+        mv.visitJumpInsn(Opcodes.GOTO, endLabel);
+        mv.visitLabel(elseLabel);
+        if (ifStmt.elseBranch() != null) {
+            emitBlock(mv, ifStmt.elseBranch(), locals.fork());
+        }
+        mv.visitLabel(endLabel);
+    }
+
+    private void emitReturn(MethodVisitor mv, AstReturnStmt returnStmt, LocalState locals) {
+        if (returnStmt.expr() != null) {
+            emitExpr(mv, returnStmt.expr(), locals);
+            mv.visitInsn(Opcodes.POP);
+        }
+        mv.visitInsn(Opcodes.RETURN);
+    }
+
+    private ExprValue emitExpr(MethodVisitor mv, AstExpr expr, LocalState locals) {
         if (expr instanceof AstStringExpr stringExpr) {
             mv.visitLdcInsn(stringExpr.literal());
             return ExprValue.of(ValueKind.STRING);
@@ -159,6 +229,12 @@ public final class Codegen {
         if (expr instanceof AstFieldAccessExpr accessExpr) {
             return emitFieldAccess(mv, accessExpr, locals);
         }
+        if (expr instanceof AstBinaryExpr binaryExpr) {
+            return emitBinary(mv, binaryExpr, locals);
+        }
+        if (expr instanceof AstUnaryExpr unaryExpr) {
+            return emitUnary(mv, unaryExpr, locals);
+        }
         if (expr instanceof AstCallExpr callExpr) {
             emitCall(mv, callExpr, locals);
             return ExprValue.of(ValueKind.VOID);
@@ -166,7 +242,7 @@ public final class Codegen {
         throw new IllegalStateException("Unsupported expression: " + expr.getClass().getSimpleName());
     }
 
-    private void emitCall(MethodVisitor mv, AstCallExpr call, Map<String, Local> locals) {
+    private void emitCall(MethodVisitor mv, AstCallExpr call, LocalState locals) {
         if (!isPrintCall(call)) {
             throw new IllegalStateException("Only std::print(...) is supported in v1");
         }
@@ -188,7 +264,7 @@ public final class Codegen {
         }
     }
 
-    private ExprValue emitStructInit(MethodVisitor mv, AstStructInitExpr initExpr, Map<String, Local> locals) {
+    private ExprValue emitStructInit(MethodVisitor mv, AstStructInitExpr initExpr, LocalState locals) {
         StructLayout layout = structLayouts.get(initExpr.name());
         if (layout == null) {
             throw new IllegalStateException("Unknown struct: " + initExpr.name());
@@ -209,7 +285,7 @@ public final class Codegen {
         return new ExprValue(ValueKind.STRUCT, layout.name());
     }
 
-    private ExprValue emitFieldAccess(MethodVisitor mv, AstFieldAccessExpr accessExpr, Map<String, Local> locals) {
+    private ExprValue emitFieldAccess(MethodVisitor mv, AstFieldAccessExpr accessExpr, LocalState locals) {
         ExprValue target = emitExpr(mv, accessExpr.target(), locals);
         if (target.kind() != ValueKind.STRUCT || target.structName() == null) {
             throw new IllegalStateException("Field access on non-struct type");
@@ -224,6 +300,100 @@ public final class Codegen {
         }
         mv.visitFieldInsn(Opcodes.GETFIELD, layout.internalName(), field.name(), field.descriptor());
         return new ExprValue(field.kind(), field.structName());
+    }
+
+    private ExprValue emitUnary(MethodVisitor mv, AstUnaryExpr unaryExpr, LocalState locals) {
+        ExprValue right = emitExpr(mv, unaryExpr.expr(), locals);
+        if ("!".equals(unaryExpr.operator())) {
+            mv.visitInsn(Opcodes.ICONST_1);
+            mv.visitInsn(Opcodes.IXOR);
+            return ExprValue.of(ValueKind.BOOL);
+        }
+        if ("-".equals(unaryExpr.operator())) {
+            mv.visitInsn(Opcodes.INEG);
+            return ExprValue.of(ValueKind.INT);
+        }
+        throw new IllegalStateException("Unsupported unary operator: " + unaryExpr.operator());
+    }
+
+    private ExprValue emitBinary(MethodVisitor mv, AstBinaryExpr binaryExpr, LocalState locals) {
+        String op = binaryExpr.operator();
+        ExprValue left = emitExpr(mv, binaryExpr.left(), locals);
+        ExprValue right = emitExpr(mv, binaryExpr.right(), locals);
+
+        if ("+".equals(op)) {
+            mv.visitInsn(Opcodes.IADD);
+            return ExprValue.of(ValueKind.INT);
+        }
+        if ("-".equals(op)) {
+            mv.visitInsn(Opcodes.ISUB);
+            return ExprValue.of(ValueKind.INT);
+        }
+        if ("*".equals(op)) {
+            mv.visitInsn(Opcodes.IMUL);
+            return ExprValue.of(ValueKind.INT);
+        }
+        if ("/".equals(op)) {
+            mv.visitInsn(Opcodes.IDIV);
+            return ExprValue.of(ValueKind.INT);
+        }
+        if ("&&".equals(op)) {
+            mv.visitInsn(Opcodes.IAND);
+            return ExprValue.of(ValueKind.BOOL);
+        }
+        if ("||".equals(op)) {
+            mv.visitInsn(Opcodes.IOR);
+            return ExprValue.of(ValueKind.BOOL);
+        }
+        if ("==".equals(op) || "!=".equals(op)) {
+            return emitEquality(mv, op, left);
+        }
+        if ("<".equals(op) || "<=".equals(op) || ">".equals(op) || ">=".equals(op)) {
+            return emitComparison(mv, op);
+        }
+        throw new IllegalStateException("Unsupported binary operator: " + op);
+    }
+
+    private ExprValue emitEquality(MethodVisitor mv, String op, ExprValue left) {
+        boolean negate = "!=".equals(op);
+        if (left.kind() == ValueKind.STRING) {
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false);
+            if (negate) {
+                mv.visitInsn(Opcodes.ICONST_1);
+                mv.visitInsn(Opcodes.IXOR);
+            }
+            return ExprValue.of(ValueKind.BOOL);
+        }
+        int opcode;
+        if (left.kind() == ValueKind.STRUCT) {
+            opcode = negate ? Opcodes.IF_ACMPNE : Opcodes.IF_ACMPEQ;
+        } else {
+            opcode = negate ? Opcodes.IF_ICMPNE : Opcodes.IF_ICMPEQ;
+        }
+        return emitBooleanJump(mv, opcode);
+    }
+
+    private ExprValue emitComparison(MethodVisitor mv, String op) {
+        int opcode = switch (op) {
+            case "<" -> Opcodes.IF_ICMPLT;
+            case "<=" -> Opcodes.IF_ICMPLE;
+            case ">" -> Opcodes.IF_ICMPGT;
+            case ">=" -> Opcodes.IF_ICMPGE;
+            default -> throw new IllegalStateException("Unsupported comparison: " + op);
+        };
+        return emitBooleanJump(mv, opcode);
+    }
+
+    private ExprValue emitBooleanJump(MethodVisitor mv, int opcode) {
+        Label trueLabel = new Label();
+        Label endLabel = new Label();
+        mv.visitJumpInsn(opcode, trueLabel);
+        mv.visitInsn(Opcodes.ICONST_0);
+        mv.visitJumpInsn(Opcodes.GOTO, endLabel);
+        mv.visitLabel(trueLabel);
+        mv.visitInsn(Opcodes.ICONST_1);
+        mv.visitLabel(endLabel);
+        return ExprValue.of(ValueKind.BOOL);
     }
 
     private void storeLocal(MethodVisitor mv, ValueKind kind, int slot) {
@@ -272,9 +442,15 @@ public final class Codegen {
     }
 
     private void buildStructLayouts(AstModule module) {
+        Set<String> structNames = new HashSet<>();
         for (AstItem item : module.items()) {
             if (item instanceof AstStruct struct) {
-                structLayouts.put(struct.name(), StructLayout.from(struct, structLayouts));
+                structNames.add(struct.name());
+            }
+        }
+        for (AstItem item : module.items()) {
+            if (item instanceof AstStruct struct) {
+                structLayouts.put(struct.name(), StructLayout.from(struct, structNames));
             }
         }
     }
@@ -295,11 +471,40 @@ public final class Codegen {
         }
     }
 
+    private static final class LocalState {
+        private final Map<String, Local> locals;
+        private final AtomicInteger nextSlot;
+
+        private LocalState() {
+            this.locals = new HashMap<>();
+            this.nextSlot = new AtomicInteger(1);
+        }
+
+        private LocalState(Map<String, Local> locals, AtomicInteger nextSlot) {
+            this.locals = locals;
+            this.nextSlot = nextSlot;
+        }
+
+        LocalState fork() {
+            return new LocalState(new HashMap<>(locals), nextSlot);
+        }
+
+        int allocate(String name, ValueKind kind, String structName) {
+            int slot = nextSlot.getAndIncrement();
+            locals.put(name, new Local(kind, slot, structName));
+            return slot;
+        }
+
+        Local get(String name) {
+            return locals.get(name);
+        }
+    }
+
     private record StructLayout(String name, String internalName, List<FieldInfo> fields) {
-        static StructLayout from(AstStruct struct, Map<String, StructLayout> known) {
+        static StructLayout from(AstStruct struct, Set<String> knownStructs) {
             List<FieldInfo> fieldInfos = new ArrayList<>();
             for (AstField field : struct.fields()) {
-                fieldInfos.add(FieldInfo.from(field, known));
+                fieldInfos.add(FieldInfo.from(field, knownStructs));
             }
             return new StructLayout(struct.name(), struct.name(), fieldInfos);
         }
@@ -335,18 +540,28 @@ public final class Codegen {
     }
 
     private record FieldInfo(String name, String descriptor, ValueKind kind, String structName) {
-        static FieldInfo from(AstField field, Map<String, StructLayout> known) {
+        static FieldInfo from(AstField field, Set<String> knownStructs) {
             String type = field.type();
             return switch (type) {
                 case "String", "std::String" -> new FieldInfo(field.name(), "Ljava/lang/String;", ValueKind.STRING, null);
                 case "i32", "int" -> new FieldInfo(field.name(), "I", ValueKind.INT, null);
                 case "bool" -> new FieldInfo(field.name(), "Z", ValueKind.BOOL, null);
                 default -> {
-                    if (known.containsKey(type)) {
+                    if (knownStructs.contains(type)) {
                         yield new FieldInfo(field.name(), "L" + type + ";", ValueKind.STRUCT, type);
                     }
                     throw new IllegalStateException("Unsupported field type: " + type);
                 }
+            };
+        }
+
+        String appendDescriptor() {
+            return switch (kind) {
+                case STRING -> "(Ljava/lang/String;)Ljava/lang/StringBuilder;";
+                case INT -> "(I)Ljava/lang/StringBuilder;";
+                case BOOL -> "(Z)Ljava/lang/StringBuilder;";
+                case STRUCT -> "(Ljava/lang/Object;)Ljava/lang/StringBuilder;";
+                default -> "(Ljava/lang/Object;)Ljava/lang/StringBuilder;";
             };
         }
     }

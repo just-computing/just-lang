@@ -13,6 +13,12 @@ public final class TypeEnvironment {
         locals.put(name, type);
     }
 
+    public TypeEnvironment fork() {
+        TypeEnvironment forked = new TypeEnvironment();
+        forked.locals.putAll(this.locals);
+        return forked;
+    }
+
     public TypeId lookup(String name) {
         return locals.get(name);
     }

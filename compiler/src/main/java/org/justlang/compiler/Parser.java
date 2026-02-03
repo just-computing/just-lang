@@ -38,16 +38,17 @@ public final class Parser {
             } while (matchSymbol(","));
         }
         expectSymbol(")");
-        expectSymbol("{");
-        List<AstStmt> body = new ArrayList<>();
-        while (!checkSymbol("}") && !isAtEnd()) {
-            body.add(parseStatement());
-        }
-        expectSymbol("}");
+        List<AstStmt> body = parseBlock();
         return new AstFunction(name.lexeme(), params, body);
     }
 
     private AstStmt parseStatement() {
+        if (matchKeyword("if")) {
+            return parseIf();
+        }
+        if (matchKeyword("return")) {
+            return parseReturn();
+        }
         if (matchKeyword("let")) {
             return parseLet();
         }
@@ -68,6 +69,120 @@ public final class Parser {
     }
 
     private AstExpr parseExpr() {
+        return parseOr();
+    }
+
+    private AstExpr parseOr() {
+        AstExpr expr = parseAnd();
+        while (true) {
+            if (matchSymbol("||")) {
+                AstExpr right = parseAnd();
+                expr = new AstBinaryExpr(expr, "||", right);
+                continue;
+            }
+            return expr;
+        }
+    }
+
+    private AstExpr parseAnd() {
+        AstExpr expr = parseEquality();
+        while (true) {
+            if (matchSymbol("&&")) {
+                AstExpr right = parseEquality();
+                expr = new AstBinaryExpr(expr, "&&", right);
+                continue;
+            }
+            return expr;
+        }
+    }
+
+    private AstExpr parseEquality() {
+        AstExpr expr = parseComparison();
+        while (true) {
+            if (matchSymbol("==")) {
+                AstExpr right = parseComparison();
+                expr = new AstBinaryExpr(expr, "==", right);
+                continue;
+            }
+            if (matchSymbol("!=")) {
+                AstExpr right = parseComparison();
+                expr = new AstBinaryExpr(expr, "!=", right);
+                continue;
+            }
+            return expr;
+        }
+    }
+
+    private AstExpr parseComparison() {
+        AstExpr expr = parseTerm();
+        while (true) {
+            if (matchSymbol("<")) {
+                AstExpr right = parseTerm();
+                expr = new AstBinaryExpr(expr, "<", right);
+                continue;
+            }
+            if (matchSymbol("<=")) {
+                AstExpr right = parseTerm();
+                expr = new AstBinaryExpr(expr, "<=", right);
+                continue;
+            }
+            if (matchSymbol(">")) {
+                AstExpr right = parseTerm();
+                expr = new AstBinaryExpr(expr, ">", right);
+                continue;
+            }
+            if (matchSymbol(">=")) {
+                AstExpr right = parseTerm();
+                expr = new AstBinaryExpr(expr, ">=", right);
+                continue;
+            }
+            return expr;
+        }
+    }
+
+    private AstExpr parseTerm() {
+        AstExpr expr = parseFactor();
+        while (true) {
+            if (matchSymbol("+")) {
+                AstExpr right = parseFactor();
+                expr = new AstBinaryExpr(expr, "+", right);
+                continue;
+            }
+            if (matchSymbol("-")) {
+                AstExpr right = parseFactor();
+                expr = new AstBinaryExpr(expr, "-", right);
+                continue;
+            }
+            return expr;
+        }
+    }
+
+    private AstExpr parseFactor() {
+        AstExpr expr = parseUnary();
+        while (true) {
+            if (matchSymbol("*")) {
+                AstExpr right = parseUnary();
+                expr = new AstBinaryExpr(expr, "*", right);
+                continue;
+            }
+            if (matchSymbol("/")) {
+                AstExpr right = parseUnary();
+                expr = new AstBinaryExpr(expr, "/", right);
+                continue;
+            }
+            return expr;
+        }
+    }
+
+    private AstExpr parseUnary() {
+        if (matchSymbol("!")) {
+            AstExpr right = parseUnary();
+            return new AstUnaryExpr("!", right);
+        }
+        if (matchSymbol("-")) {
+            AstExpr right = parseUnary();
+            return new AstUnaryExpr("-", right);
+        }
         AstExpr expr = parsePrimary();
         while (matchSymbol(".")) {
             Token field = expect(Token.TokenKind.IDENT, "Expected field name after '.'");
@@ -119,7 +234,42 @@ public final class Parser {
             }
             return new AstPathExpr(path);
         }
+        if (matchSymbol("(")) {
+            AstExpr expr = parseExpr();
+            expectSymbol(")");
+            return expr;
+        }
         throw error(peek(), "Expected expression");
+    }
+
+    private List<AstStmt> parseBlock() {
+        expectSymbol("{");
+        List<AstStmt> body = new ArrayList<>();
+        while (!checkSymbol("}") && !isAtEnd()) {
+            body.add(parseStatement());
+        }
+        expectSymbol("}");
+        return body;
+    }
+
+    private AstStmt parseIf() {
+        AstExpr condition = parseExpr();
+        List<AstStmt> thenBranch = parseBlock();
+        List<AstStmt> elseBranch = null;
+        if (matchKeyword("else")) {
+            elseBranch = parseBlock();
+        }
+        return new AstIfStmt(condition, thenBranch, elseBranch);
+    }
+
+    private AstStmt parseReturn() {
+        if (checkSymbol(";")) {
+            expectSymbol(";");
+            return new AstReturnStmt(null);
+        }
+        AstExpr expr = parseExpr();
+        expectSymbol(";");
+        return new AstReturnStmt(expr);
     }
 
     private AstStruct parseStruct() {
