@@ -1,6 +1,8 @@
 package org.justlang.compiler;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -17,6 +19,8 @@ public final class Codegen {
     private static final String MAIN_INTERNAL_NAME = "Main";
     private final Map<String, StructLayout> structLayouts = new HashMap<>();
     private final Map<String, FunctionInfo> functions = new HashMap<>();
+    private final Deque<LoopLabels> loopStack = new ArrayDeque<>();
+    private ReturnInfo currentReturnInfo;
 
     public List<ClassFile> emit(AstModule module) {
         buildStructLayouts(module);
@@ -140,9 +144,6 @@ public final class Codegen {
         if (info == null) {
             throw new IllegalStateException("Unknown function: " + fn.name());
         }
-        if (!fn.params().isEmpty()) {
-            throw new IllegalStateException("Function parameters are not supported yet");
-        }
         MethodVisitor mv = writer.visitMethod(
             Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
             fn.name(),
@@ -151,9 +152,17 @@ public final class Codegen {
             null
         );
         mv.visitCode();
-        LocalState locals = new LocalState(0);
         ReturnInfo returnInfo = new ReturnInfo(info.returnKind(), info.returnStructName());
+        ReturnInfo previousReturn = currentReturnInfo;
+        currentReturnInfo = returnInfo;
+        LocalState locals = new LocalState(info.paramCount());
+        int slot = 0;
+        for (ParamInfo param : info.params()) {
+            locals.define(param.name(), param.kind(), param.structName(), slot);
+            slot += 1;
+        }
         emitBlock(mv, fn.body(), locals, returnInfo);
+        currentReturnInfo = previousReturn;
         if (returnInfo.kind() == ValueKind.VOID) {
             mv.visitInsn(Opcodes.RETURN);
         }
@@ -176,7 +185,11 @@ public final class Codegen {
         mv.visitCode();
 
         LocalState locals = new LocalState(1);
-        emitBlock(mv, main.body(), locals, new ReturnInfo(ValueKind.VOID, null));
+        ReturnInfo returnInfo = new ReturnInfo(ValueKind.VOID, null);
+        ReturnInfo previousReturn = currentReturnInfo;
+        currentReturnInfo = returnInfo;
+        emitBlock(mv, main.body(), locals, returnInfo);
+        currentReturnInfo = previousReturn;
 
         mv.visitInsn(Opcodes.RETURN);
         mv.visitMaxs(0, 0);
@@ -185,35 +198,51 @@ public final class Codegen {
 
     private void emitBlock(MethodVisitor mv, List<AstStmt> statements, LocalState locals, ReturnInfo returnInfo) {
         for (AstStmt stmt : statements) {
-            if (stmt instanceof AstIfStmt ifStmt) {
-                emitIf(mv, ifStmt, locals, returnInfo);
-                continue;
-            }
-            if (stmt instanceof AstReturnStmt returnStmt) {
-                emitReturn(mv, returnStmt, locals, returnInfo);
-                continue;
-            }
-            if (stmt instanceof AstLetStmt letStmt) {
-                if (letStmt.initializer() == null) {
-                    throw new IllegalStateException("let without initializer is not supported");
-                }
-                ExprValue value = emitExpr(mv, letStmt.initializer(), locals);
-                if (value.kind() == ValueKind.VOID) {
-                    throw new IllegalStateException("Cannot assign void expression to let binding");
-                }
-                int slot = locals.allocate(letStmt.name(), value.kind(), value.structName());
-                storeLocal(mv, value.kind(), slot);
-                continue;
-            }
-            if (stmt instanceof AstExprStmt exprStmt) {
-                ExprValue value = emitExpr(mv, exprStmt.expr(), locals);
-                if (value.kind() != ValueKind.VOID) {
-                    mv.visitInsn(Opcodes.POP);
-                }
-                continue;
-            }
-            throw new IllegalStateException("Unsupported statement: " + stmt.getClass().getSimpleName());
+            emitStatement(mv, stmt, locals, returnInfo);
         }
+    }
+
+    private void emitStatement(MethodVisitor mv, AstStmt stmt, LocalState locals, ReturnInfo returnInfo) {
+        if (stmt instanceof AstIfStmt ifStmt) {
+            emitIf(mv, ifStmt, locals, returnInfo);
+            return;
+        }
+        if (stmt instanceof AstWhileStmt whileStmt) {
+            emitWhile(mv, whileStmt, locals, returnInfo);
+            return;
+        }
+        if (stmt instanceof AstBreakStmt) {
+            emitBreak(mv);
+            return;
+        }
+        if (stmt instanceof AstContinueStmt) {
+            emitContinue(mv);
+            return;
+        }
+        if (stmt instanceof AstReturnStmt returnStmt) {
+            emitReturn(mv, returnStmt, locals, returnInfo);
+            return;
+        }
+        if (stmt instanceof AstLetStmt letStmt) {
+            if (letStmt.initializer() == null) {
+                throw new IllegalStateException("let without initializer is not supported");
+            }
+            ExprValue value = emitExpr(mv, letStmt.initializer(), locals);
+            if (value.kind() == ValueKind.VOID) {
+                throw new IllegalStateException("Cannot assign void expression to let binding");
+            }
+            int slot = locals.allocate(letStmt.name(), value.kind(), value.structName());
+            storeLocal(mv, value.kind(), slot);
+            return;
+        }
+        if (stmt instanceof AstExprStmt exprStmt) {
+            ExprValue value = emitExpr(mv, exprStmt.expr(), locals);
+            if (value.kind() != ValueKind.VOID) {
+                mv.visitInsn(Opcodes.POP);
+            }
+            return;
+        }
+        throw new IllegalStateException("Unsupported statement: " + stmt.getClass().getSimpleName());
     }
 
     private void emitIf(MethodVisitor mv, AstIfStmt ifStmt, LocalState locals, ReturnInfo returnInfo) {
@@ -231,6 +260,38 @@ public final class Codegen {
             emitBlock(mv, ifStmt.elseBranch(), locals.fork(), returnInfo);
         }
         mv.visitLabel(endLabel);
+    }
+
+    private void emitWhile(MethodVisitor mv, AstWhileStmt whileStmt, LocalState locals, ReturnInfo returnInfo) {
+        Label startLabel = new Label();
+        Label endLabel = new Label();
+        mv.visitLabel(startLabel);
+        ExprValue condition = emitExpr(mv, whileStmt.condition(), locals);
+        if (condition.kind() != ValueKind.BOOL) {
+            throw new IllegalStateException("while condition must be bool");
+        }
+        mv.visitJumpInsn(Opcodes.IFEQ, endLabel);
+        loopStack.push(new LoopLabels(startLabel, endLabel));
+        emitBlock(mv, whileStmt.body(), locals.fork(), returnInfo);
+        loopStack.pop();
+        mv.visitJumpInsn(Opcodes.GOTO, startLabel);
+        mv.visitLabel(endLabel);
+    }
+
+    private void emitBreak(MethodVisitor mv) {
+        LoopLabels labels = loopStack.peek();
+        if (labels == null) {
+            throw new IllegalStateException("break is only valid inside loops");
+        }
+        mv.visitJumpInsn(Opcodes.GOTO, labels.breakLabel());
+    }
+
+    private void emitContinue(MethodVisitor mv) {
+        LoopLabels labels = loopStack.peek();
+        if (labels == null) {
+            throw new IllegalStateException("continue is only valid inside loops");
+        }
+        mv.visitJumpInsn(Opcodes.GOTO, labels.continueLabel());
     }
 
     private void emitReturn(MethodVisitor mv, AstReturnStmt returnStmt, LocalState locals, ReturnInfo returnInfo) {
@@ -270,8 +331,26 @@ public final class Codegen {
         if (!thenValue.matches(new ReturnInfo(elseValue.kind(), elseValue.structName()))) {
             throw new IllegalStateException("if expression branches must return the same type");
         }
+        if (thenValue.kind() == ValueKind.VOID) {
+            throw new IllegalStateException("if expression cannot be void");
+        }
         mv.visitLabel(endLabel);
         return thenValue;
+    }
+
+    private ExprValue emitBlockExpr(MethodVisitor mv, AstBlockExpr blockExpr, LocalState locals) {
+        if (currentReturnInfo == null) {
+            throw new IllegalStateException("Missing return context for block expression");
+        }
+        LocalState blockLocals = locals.fork();
+        for (AstStmt stmt : blockExpr.statements()) {
+            emitStatement(mv, stmt, blockLocals, currentReturnInfo);
+        }
+        ExprValue value = emitExpr(mv, blockExpr.value(), blockLocals);
+        if (value.kind() == ValueKind.VOID) {
+            throw new IllegalStateException("block expression cannot be void");
+        }
+        return value;
     }
 
     private ExprValue emitExpr(MethodVisitor mv, AstExpr expr, LocalState locals) {
@@ -314,6 +393,9 @@ public final class Codegen {
         if (expr instanceof AstIfExpr ifExpr) {
             return emitIfExpr(mv, ifExpr, locals);
         }
+        if (expr instanceof AstBlockExpr blockExpr) {
+            return emitBlockExpr(mv, blockExpr, locals);
+        }
         throw new IllegalStateException("Unsupported expression: " + expr.getClass().getSimpleName());
     }
 
@@ -327,8 +409,15 @@ public final class Codegen {
             if (info == null) {
                 throw new IllegalStateException("Unknown function: " + name);
             }
-            if (!call.args().isEmpty()) {
-                throw new IllegalStateException("Function parameters are not supported yet");
+            if (call.args().size() != info.paramCount()) {
+                throw new IllegalStateException("Function '" + name + "' expects " + info.paramCount() + " arguments");
+            }
+            for (int i = 0; i < call.args().size(); i++) {
+                ExprValue arg = emitExpr(mv, call.args().get(i), locals);
+                ParamInfo param = info.params().get(i);
+                if (!arg.matches(new ReturnInfo(param.kind(), param.structName()))) {
+                    throw new IllegalStateException("Argument " + (i + 1) + " type mismatch for function " + name);
+                }
             }
             mv.visitMethodInsn(Opcodes.INVOKESTATIC, MAIN_INTERNAL_NAME, name, info.descriptor(), false);
             return new ExprValue(info.returnKind(), info.returnStructName());
@@ -443,9 +532,15 @@ public final class Codegen {
     private ExprValue emitLogicalAnd(MethodVisitor mv, AstExpr leftExpr, AstExpr rightExpr, LocalState locals) {
         Label falseLabel = new Label();
         Label endLabel = new Label();
-        emitExpr(mv, leftExpr, locals);
+        ExprValue left = emitExpr(mv, leftExpr, locals);
+        if (left.kind() != ValueKind.BOOL) {
+            throw new IllegalStateException("Logical && requires bool operands");
+        }
         mv.visitJumpInsn(Opcodes.IFEQ, falseLabel);
-        emitExpr(mv, rightExpr, locals);
+        ExprValue right = emitExpr(mv, rightExpr, locals);
+        if (right.kind() != ValueKind.BOOL) {
+            throw new IllegalStateException("Logical && requires bool operands");
+        }
         mv.visitJumpInsn(Opcodes.IFEQ, falseLabel);
         mv.visitInsn(Opcodes.ICONST_1);
         mv.visitJumpInsn(Opcodes.GOTO, endLabel);
@@ -458,9 +553,15 @@ public final class Codegen {
     private ExprValue emitLogicalOr(MethodVisitor mv, AstExpr leftExpr, AstExpr rightExpr, LocalState locals) {
         Label trueLabel = new Label();
         Label endLabel = new Label();
-        emitExpr(mv, leftExpr, locals);
+        ExprValue left = emitExpr(mv, leftExpr, locals);
+        if (left.kind() != ValueKind.BOOL) {
+            throw new IllegalStateException("Logical || requires bool operands");
+        }
         mv.visitJumpInsn(Opcodes.IFNE, trueLabel);
-        emitExpr(mv, rightExpr, locals);
+        ExprValue right = emitExpr(mv, rightExpr, locals);
+        if (right.kind() != ValueKind.BOOL) {
+            throw new IllegalStateException("Logical || requires bool operands");
+        }
         mv.visitJumpInsn(Opcodes.IFNE, trueLabel);
         mv.visitInsn(Opcodes.ICONST_0);
         mv.visitJumpInsn(Opcodes.GOTO, endLabel);
@@ -563,11 +664,8 @@ public final class Codegen {
                 if (functions.containsKey(fn.name())) {
                     throw new IllegalStateException("Duplicate function: " + fn.name());
                 }
-                if (!fn.params().isEmpty()) {
-                    throw new IllegalStateException("Function parameters are not supported yet");
-                }
                 TypeId returnType = resolveReturnType(fn.returnType());
-                FunctionInfo info = functionInfoFrom(fn.name(), returnType);
+                FunctionInfo info = functionInfoFrom(fn, returnType);
                 functions.put(fn.name(), info);
             }
         }
@@ -609,10 +707,28 @@ public final class Codegen {
         return TypeId.UNKNOWN;
     }
 
-    private FunctionInfo functionInfoFrom(String name, TypeId returnType) {
+    private FunctionInfo functionInfoFrom(AstFunction fn, TypeId returnType) {
+        List<ParamInfo> params = new ArrayList<>();
+        StringBuilder descriptor = new StringBuilder();
+        descriptor.append('(');
+        for (AstParam param : fn.params()) {
+            TypeId paramType = resolveTypeName(param.type());
+            if (paramType == TypeId.UNKNOWN) {
+                throw new IllegalStateException("Unknown parameter type: " + param.type());
+            }
+            if (paramType == TypeId.VOID) {
+                throw new IllegalStateException("Parameter type cannot be void");
+            }
+            ValueKind paramKind = toValueKind(paramType);
+            String paramStruct = paramType.isStruct() ? paramType.structName() : null;
+            String paramDesc = descriptorFor(paramType);
+            params.add(new ParamInfo(param.name(), paramKind, paramStruct, paramDesc));
+            descriptor.append(paramDesc);
+        }
+        descriptor.append(')').append(descriptorFor(returnType));
         ValueKind kind = toValueKind(returnType);
         String structName = returnType.isStruct() ? returnType.structName() : null;
-        return new FunctionInfo(name, kind, structName, "()" + descriptorFor(returnType), 0);
+        return new FunctionInfo(fn.name(), kind, structName, descriptor.toString(), params);
     }
 
     private ValueKind toValueKind(TypeId type) {
@@ -661,7 +777,13 @@ public final class Codegen {
         VOID
     }
 
-    private record FunctionInfo(String name, ValueKind returnKind, String returnStructName, String descriptor, int paramCount) {}
+    private record ParamInfo(String name, ValueKind kind, String structName, String descriptor) {}
+
+    private record FunctionInfo(String name, ValueKind returnKind, String returnStructName, String descriptor, List<ParamInfo> params) {
+        int paramCount() {
+            return params.size();
+        }
+    }
 
     private record Local(ValueKind kind, int slot, String structName) {}
 
@@ -682,6 +804,8 @@ public final class Codegen {
     }
 
     private record ReturnInfo(ValueKind kind, String structName) {}
+
+    private record LoopLabels(Label continueLabel, Label breakLabel) {}
 
     private static final class LocalState {
         private final Map<String, Local> locals;
@@ -705,6 +829,11 @@ public final class Codegen {
             int slot = nextSlot.getAndIncrement();
             locals.put(name, new Local(kind, slot, structName));
             return slot;
+        }
+
+        void define(String name, ValueKind kind, String structName, int slot) {
+            locals.put(name, new Local(kind, slot, structName));
+            nextSlot.updateAndGet(current -> Math.max(current, slot + 1));
         }
 
         Local get(String name) {

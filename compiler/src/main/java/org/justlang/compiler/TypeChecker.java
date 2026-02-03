@@ -1,8 +1,12 @@
 package org.justlang.compiler;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public final class TypeChecker {
+    private TypeId currentReturnType = TypeId.VOID;
+    private int loopDepth = 0;
+
     public TypedModule typeCheck(HirModule module) {
         throw new UnsupportedOperationException("Type checker not implemented yet");
     }
@@ -26,10 +30,28 @@ public final class TypeChecker {
                     success = false;
                     continue;
                 }
-                if (!fn.params().isEmpty()) {
-                    diags.addError("Function parameters are not supported yet");
+
+                if ("main".equals(fn.name()) && !fn.params().isEmpty()) {
+                    diags.addError("main does not accept parameters");
                     success = false;
                 }
+
+                List<TypeId> paramTypes = new ArrayList<>();
+                for (AstParam param : fn.params()) {
+                    TypeId paramType = resolveTypeName(param.type(), structs);
+                    if (paramType == TypeId.UNKNOWN) {
+                        diags.addError("Unknown parameter type: " + param.type());
+                        success = false;
+                        continue;
+                    }
+                    if (paramType == TypeId.VOID) {
+                        diags.addError("Parameter type cannot be void");
+                        success = false;
+                        continue;
+                    }
+                    paramTypes.add(paramType);
+                }
+
                 TypeId returnType = resolveReturnType(fn.returnType(), structs, diags);
                 if (returnType == TypeId.UNKNOWN) {
                     success = false;
@@ -38,7 +60,8 @@ public final class TypeChecker {
                     diags.addError("main must return void");
                     success = false;
                 }
-                functions.register(fn.name(), new FunctionRegistry.FunctionSig(fn.name(), returnType, fn.params().size()));
+
+                functions.register(fn.name(), new FunctionRegistry.FunctionSig(fn.name(), returnType, paramTypes));
             }
         }
 
@@ -65,10 +88,25 @@ public final class TypeChecker {
             return false;
         }
 
+        FunctionRegistry.FunctionSig sig = functions.find(fn.name());
+        if (sig == null) {
+            diags.addError("Unknown function signature for " + fn.name());
+            return false;
+        }
+
         TypeEnvironment locals = new TypeEnvironment();
+        List<TypeId> paramTypes = sig.paramTypes();
+        for (int i = 0; i < fn.params().size(); i++) {
+            TypeId paramType = paramTypes.get(i);
+            locals.define(fn.params().get(i).name(), paramType);
+        }
+
+        TypeId previousReturn = currentReturnType;
+        currentReturnType = expectedReturn;
         if (!checkBlock(fn.body(), locals, structs, functions, expectedReturn, diags)) {
             success = false;
         }
+        currentReturnType = previousReturn;
 
         if (expectedReturn != TypeId.VOID && !endsWithReturnValue(fn.body())) {
             diags.addError("Non-void functions must end with return <expr>");
@@ -125,6 +163,33 @@ public final class TypeChecker {
                     if (!checkBlock(ifStmt.elseBranch(), locals.fork(), structs, functions, expectedReturn, diags)) {
                         success = false;
                     }
+                }
+                continue;
+            }
+            if (stmt instanceof AstWhileStmt whileStmt) {
+                TypeId condType = inferExpr(whileStmt.condition(), locals, structs, functions, diags);
+                if (condType != TypeId.BOOL) {
+                    diags.addError("while condition must be bool");
+                    success = false;
+                }
+                loopDepth++;
+                if (!checkBlock(whileStmt.body(), locals.fork(), structs, functions, expectedReturn, diags)) {
+                    success = false;
+                }
+                loopDepth--;
+                continue;
+            }
+            if (stmt instanceof AstBreakStmt) {
+                if (loopDepth == 0) {
+                    diags.addError("break is only valid inside loops");
+                    success = false;
+                }
+                continue;
+            }
+            if (stmt instanceof AstContinueStmt) {
+                if (loopDepth == 0) {
+                    diags.addError("continue is only valid inside loops");
+                    success = false;
                 }
                 continue;
             }
@@ -263,6 +328,18 @@ public final class TypeChecker {
             }
             return thenType;
         }
+        if (expr instanceof AstBlockExpr blockExpr) {
+            TypeEnvironment blockLocals = locals.fork();
+            if (!checkBlock(blockExpr.statements(), blockLocals, structs, functions, currentReturnType, diags)) {
+                return TypeId.UNKNOWN;
+            }
+            TypeId valueType = inferExpr(blockExpr.value(), blockLocals, structs, functions, diags);
+            if (valueType == TypeId.VOID) {
+                diags.addError("block expression cannot be void");
+                return TypeId.UNKNOWN;
+            }
+            return valueType;
+        }
         if (expr instanceof AstPathExpr pathExpr) {
             diags.addError("Unsupported path expression: " + String.join("::", pathExpr.segments()));
             return TypeId.UNKNOWN;
@@ -299,14 +376,18 @@ public final class TypeChecker {
 
         if (sig.paramCount() != callExpr.args().size()) {
             diags.addError("Function '" + name + "' expects " + sig.paramCount() + " arguments");
-        }
-        for (AstExpr arg : callExpr.args()) {
-            inferExpr(arg, locals, structs, functions, diags);
-        }
-        if (sig.paramCount() > 0) {
-            diags.addError("Function parameters are not supported yet");
             return TypeId.UNKNOWN;
         }
+
+        List<TypeId> paramTypes = sig.paramTypes();
+        for (int i = 0; i < callExpr.args().size(); i++) {
+            TypeId argType = inferExpr(callExpr.args().get(i), locals, structs, functions, diags);
+            if (!paramTypes.get(i).equals(argType)) {
+                diags.addError("Argument " + (i + 1) + " of '" + name + "' expected " + paramTypes.get(i) + " got " + argType);
+                return TypeId.UNKNOWN;
+            }
+        }
+
         return sig.returnType();
     }
 

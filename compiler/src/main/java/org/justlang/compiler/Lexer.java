@@ -14,7 +14,10 @@ public final class Lexer {
         "true",
         "false",
         "if",
-        "else"
+        "else",
+        "while",
+        "break",
+        "continue"
     );
 
     public List<Token> lex(SourceFile sourceFile) {

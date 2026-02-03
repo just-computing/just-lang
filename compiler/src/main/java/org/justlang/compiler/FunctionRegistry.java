@@ -1,6 +1,7 @@
 package org.justlang.compiler;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 public final class FunctionRegistry {
@@ -18,5 +19,9 @@ public final class FunctionRegistry {
         return functions.containsKey(name);
     }
 
-    public record FunctionSig(String name, TypeId returnType, int paramCount) {}
+    public record FunctionSig(String name, TypeId returnType, List<TypeId> paramTypes) {
+        public int paramCount() {
+            return paramTypes.size();
+        }
+    }
 }

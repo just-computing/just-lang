@@ -34,7 +34,9 @@ public final class Parser {
         if (!checkSymbol(")")) {
             do {
                 Token paramName = expect(Token.TokenKind.IDENT, "Expected parameter name");
-                params.add(new AstParam(paramName.lexeme()));
+                expectSymbol(":");
+                String paramType = parseTypeName();
+                params.add(new AstParam(paramName.lexeme(), paramType));
             } while (matchSymbol(","));
         }
         expectSymbol(")");
@@ -49,6 +51,17 @@ public final class Parser {
     private AstStmt parseStatement() {
         if (matchKeyword("if")) {
             return parseIf();
+        }
+        if (matchKeyword("while")) {
+            return parseWhile();
+        }
+        if (matchKeyword("break")) {
+            expectSymbol(";");
+            return new AstBreakStmt();
+        }
+        if (matchKeyword("continue")) {
+            expectSymbol(";");
+            return new AstContinueStmt();
         }
         if (matchKeyword("return")) {
             return parseReturn();
@@ -269,6 +282,12 @@ public final class Parser {
         return new AstIfStmt(condition, thenBranch, elseBranch);
     }
 
+    private AstStmt parseWhile() {
+        AstExpr condition = parseExpr();
+        List<AstStmt> body = parseBlock();
+        return new AstWhileStmt(condition, body);
+    }
+
     private AstExpr parseIfExpr() {
         AstExpr condition = parseExpr();
         AstExpr thenExpr = parseBlockExpr();
@@ -281,9 +300,44 @@ public final class Parser {
 
     private AstExpr parseBlockExpr() {
         expectSymbol("{");
-        AstExpr expr = parseExpr();
+        List<AstStmt> statements = new ArrayList<>();
+        AstExpr value = null;
+        while (!checkSymbol("}") && !isAtEnd()) {
+            if (matchKeyword("let")) {
+                statements.add(parseLet());
+                continue;
+            }
+            if (matchKeyword("while")) {
+                statements.add(parseWhile());
+                continue;
+            }
+            if (matchKeyword("break")) {
+                expectSymbol(";");
+                statements.add(new AstBreakStmt());
+                continue;
+            }
+            if (matchKeyword("continue")) {
+                expectSymbol(";");
+                statements.add(new AstContinueStmt());
+                continue;
+            }
+            if (matchKeyword("return")) {
+                statements.add(parseReturn());
+                continue;
+            }
+            AstExpr expr = parseExpr();
+            if (matchSymbol(";")) {
+                statements.add(new AstExprStmt(expr));
+                continue;
+            }
+            value = expr;
+            break;
+        }
         expectSymbol("}");
-        return expr;
+        if (value == null) {
+            throw error(previous(), "Block expression must end with a value");
+        }
+        return new AstBlockExpr(statements, value);
     }
 
     private AstStmt parseReturn() {
