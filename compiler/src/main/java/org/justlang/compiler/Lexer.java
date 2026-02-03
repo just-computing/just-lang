@@ -135,6 +135,6 @@ public final class Lexer {
     }
 
     private static boolean isSymbolChar(char c) {
-        return "(){}[],;=:+-*/&<>".indexOf(c) >= 0;
+        return "(){}[],;=:+-*/&<>.".indexOf(c) >= 0;
     }
 }

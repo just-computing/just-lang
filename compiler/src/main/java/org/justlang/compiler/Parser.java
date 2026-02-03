@@ -68,7 +68,12 @@ public final class Parser {
     }
 
     private AstExpr parseExpr() {
-        return parsePrimary();
+        AstExpr expr = parsePrimary();
+        while (matchSymbol(".")) {
+            Token field = expect(Token.TokenKind.IDENT, "Expected field name after '.'");
+            expr = new AstFieldAccessExpr(expr, field.lexeme());
+        }
+        return expr;
     }
 
     private AstExpr parsePrimary() {
@@ -86,6 +91,19 @@ public final class Parser {
         }
         if (check(Token.TokenKind.IDENT)) {
             List<String> path = parsePath();
+            if (path.size() == 1 && matchSymbol("{")) {
+                List<AstFieldInit> fields = new ArrayList<>();
+                if (!checkSymbol("}")) {
+                    do {
+                        Token fieldName = expect(Token.TokenKind.IDENT, "Expected field name");
+                        expectSymbol(":");
+                        AstExpr value = parseExpr();
+                        fields.add(new AstFieldInit(fieldName.lexeme(), value));
+                    } while (matchSymbol(","));
+                }
+                expectSymbol("}");
+                return new AstStructInitExpr(path.get(0), fields);
+            }
             if (matchSymbol("(")) {
                 List<AstExpr> args = new ArrayList<>();
                 if (!checkSymbol(")")) {
@@ -111,8 +129,8 @@ public final class Parser {
         while (!checkSymbol("}") && !isAtEnd()) {
             Token fieldName = expect(Token.TokenKind.IDENT, "Expected field name");
             expectSymbol(":");
-            Token fieldType = expect(Token.TokenKind.IDENT, "Expected field type");
-            fields.add(new AstField(fieldName.lexeme(), fieldType.lexeme()));
+            String fieldType = parseTypeName();
+            fields.add(new AstField(fieldName.lexeme(), fieldType));
             if (!matchSymbol(",")) {
                 break;
             }
@@ -130,6 +148,14 @@ public final class Parser {
             segments.add(segment.lexeme());
         }
         return segments;
+    }
+
+    private String parseTypeName() {
+        if (check(Token.TokenKind.IDENT)) {
+            List<String> path = parsePath();
+            return String.join("::", path);
+        }
+        throw error(peek(), "Expected type name");
     }
 
     private boolean match(Token.TokenKind kind) {

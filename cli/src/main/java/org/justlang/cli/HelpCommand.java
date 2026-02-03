@@ -22,6 +22,8 @@ public final class HelpCommand implements Command {
         System.err.println("  just run <file.just|dir>");
         System.err.println("  just check <file.just|dir>");
         System.err.println("  just jargo new <name>");
+        System.err.println("  just jargo build");
+        System.err.println("  just jargo run");
         return 2;
     }
 }

@@ -98,6 +98,18 @@ public final class ArgsParser {
             }
             return new JargoNewCommand(args[2]);
         }
+        if ("build".equals(subcommand)) {
+            if (args.length > 2) {
+                return HelpCommand.usage("Unexpected arguments for jargo build.");
+            }
+            return new JargoBuildCommand(java.nio.file.Path.of(System.getProperty("user.dir")));
+        }
+        if ("run".equals(subcommand)) {
+            if (args.length > 2) {
+                return HelpCommand.usage("Unexpected arguments for jargo run.");
+            }
+            return new JargoRunCommand(java.nio.file.Path.of(System.getProperty("user.dir")));
+        }
         return HelpCommand.usage("Unknown jargo subcommand: " + subcommand);
     }
 }

@@ -26,6 +26,7 @@ public final class JustCompiler {
 
         Lexer lexer = new Lexer();
         Parser parser = new Parser();
+        TypeChecker typeChecker = new TypeChecker();
         java.util.List<AstItem> items = new java.util.ArrayList<>();
         boolean success = true;
 
@@ -33,6 +34,13 @@ public final class JustCompiler {
             try {
                 java.util.List<Token> tokens = lexer.lex(source);
                 AstModule module = parser.parse(tokens);
+                TypeResult typeResult = typeChecker.typeCheck(module);
+                if (!typeResult.success()) {
+                    for (String error : typeResult.environment().errors()) {
+                        diagnostics.add(new Diagnostic(error, source.path()));
+                    }
+                    success = false;
+                }
                 items.addAll(module.items());
             } catch (RuntimeException error) {
                 diagnostics.add(new Diagnostic(error.getMessage(), source.path()));
