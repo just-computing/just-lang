@@ -207,8 +207,16 @@ public final class Codegen {
             emitIf(mv, ifStmt, locals, returnInfo);
             return;
         }
+        if (stmt instanceof AstForStmt forStmt) {
+            emitFor(mv, forStmt, locals, returnInfo);
+            return;
+        }
         if (stmt instanceof AstWhileStmt whileStmt) {
             emitWhile(mv, whileStmt, locals, returnInfo);
+            return;
+        }
+        if (stmt instanceof AstAssignStmt assignStmt) {
+            emitAssign(mv, assignStmt, locals);
             return;
         }
         if (stmt instanceof AstBreakStmt) {
@@ -245,6 +253,42 @@ public final class Codegen {
         throw new IllegalStateException("Unsupported statement: " + stmt.getClass().getSimpleName());
     }
 
+    private void emitAssign(MethodVisitor mv, AstAssignStmt assignStmt, LocalState locals) {
+        Local local = locals.get(assignStmt.name());
+        if (local == null) {
+            throw new IllegalStateException("Unknown identifier: " + assignStmt.name());
+        }
+        String op = assignStmt.operator();
+        if ("=".equals(op)) {
+            ExprValue value = emitExpr(mv, assignStmt.value(), locals);
+            if (value.kind() == ValueKind.VOID) {
+                throw new IllegalStateException("Cannot assign void expression to " + assignStmt.name());
+            }
+            if (value.kind() != local.kind() || (value.kind() == ValueKind.STRUCT && !value.structName().equals(local.structName()))) {
+                throw new IllegalStateException("Type mismatch in assignment to " + assignStmt.name());
+            }
+            storeLocal(mv, local.kind(), local.slot());
+            return;
+        }
+
+        if (local.kind() != ValueKind.INT) {
+            throw new IllegalStateException("Compound assignment requires int variable");
+        }
+        loadLocal(mv, ValueKind.INT, local.slot());
+        ExprValue value = emitExpr(mv, assignStmt.value(), locals);
+        if (value.kind() != ValueKind.INT) {
+            throw new IllegalStateException("Compound assignment requires int value");
+        }
+        switch (op) {
+            case "+=" -> mv.visitInsn(Opcodes.IADD);
+            case "-=" -> mv.visitInsn(Opcodes.ISUB);
+            case "*=" -> mv.visitInsn(Opcodes.IMUL);
+            case "/=" -> mv.visitInsn(Opcodes.IDIV);
+            default -> throw new IllegalStateException("Unsupported assignment operator: " + op);
+        }
+        storeLocal(mv, ValueKind.INT, local.slot());
+    }
+
     private void emitIf(MethodVisitor mv, AstIfStmt ifStmt, LocalState locals, ReturnInfo returnInfo) {
         ExprValue condition = emitExpr(mv, ifStmt.condition(), locals);
         if (condition.kind() != ValueKind.BOOL) {
@@ -274,6 +318,45 @@ public final class Codegen {
         loopStack.push(new LoopLabels(startLabel, endLabel));
         emitBlock(mv, whileStmt.body(), locals.fork(), returnInfo);
         loopStack.pop();
+        mv.visitJumpInsn(Opcodes.GOTO, startLabel);
+        mv.visitLabel(endLabel);
+    }
+
+    private void emitFor(MethodVisitor mv, AstForStmt forStmt, LocalState locals, ReturnInfo returnInfo) {
+        LocalState loopLocals = locals.fork();
+        int loopSlot = loopLocals.allocate(forStmt.name(), ValueKind.INT, null);
+        ExprValue startValue = emitExpr(mv, forStmt.start(), locals);
+        if (startValue.kind() != ValueKind.INT) {
+            throw new IllegalStateException("for loop start must be int");
+        }
+        storeLocal(mv, ValueKind.INT, loopSlot);
+
+        ExprValue endValue = emitExpr(mv, forStmt.end(), locals);
+        if (endValue.kind() != ValueKind.INT) {
+            throw new IllegalStateException("for loop end must be int");
+        }
+        int endSlot = loopLocals.allocateTemp();
+        storeLocal(mv, ValueKind.INT, endSlot);
+
+        Label startLabel = new Label();
+        Label continueLabel = new Label();
+        Label endLabel = new Label();
+
+        mv.visitLabel(startLabel);
+        loadLocal(mv, ValueKind.INT, loopSlot);
+        loadLocal(mv, ValueKind.INT, endSlot);
+        int jumpOp = forStmt.inclusive() ? Opcodes.IF_ICMPGT : Opcodes.IF_ICMPGE;
+        mv.visitJumpInsn(jumpOp, endLabel);
+
+        loopStack.push(new LoopLabels(continueLabel, endLabel));
+        emitBlock(mv, forStmt.body(), loopLocals.fork(), returnInfo);
+        loopStack.pop();
+
+        mv.visitLabel(continueLabel);
+        loadLocal(mv, ValueKind.INT, loopSlot);
+        mv.visitInsn(Opcodes.ICONST_1);
+        mv.visitInsn(Opcodes.IADD);
+        storeLocal(mv, ValueKind.INT, loopSlot);
         mv.visitJumpInsn(Opcodes.GOTO, startLabel);
         mv.visitLabel(endLabel);
     }
@@ -353,6 +436,91 @@ public final class Codegen {
         return value;
     }
 
+    private ExprValue emitMatchExpr(MethodVisitor mv, AstMatchExpr matchExpr, LocalState locals) {
+        ExprValue target = emitExpr(mv, matchExpr.target(), locals);
+        if (target.kind() != ValueKind.INT && target.kind() != ValueKind.BOOL && target.kind() != ValueKind.STRING) {
+            throw new IllegalStateException("match target must be int, bool, or String");
+        }
+        int targetSlot = locals.allocateTemp();
+        storeLocal(mv, target.kind(), targetSlot);
+
+        Label endLabel = new Label();
+        ExprValue resultType = null;
+        Label defaultLabel = null;
+
+        List<ArmCode> arms = new ArrayList<>();
+        for (AstMatchArm arm : matchExpr.arms()) {
+            Label label = new Label();
+            arms.add(new ArmCode(arm, label));
+            AstMatchPattern pattern = arm.pattern();
+            if (pattern.kind() == AstMatchPattern.Kind.WILDCARD) {
+                defaultLabel = label;
+                continue;
+            }
+            emitMatchCompare(mv, target, targetSlot, pattern, label);
+        }
+
+        if (defaultLabel == null) {
+            throw new IllegalStateException("match requires a wildcard '_' arm");
+        }
+
+        mv.visitJumpInsn(Opcodes.GOTO, defaultLabel);
+
+        for (ArmCode arm : arms) {
+            mv.visitLabel(arm.label());
+            ExprValue value = emitExpr(mv, arm.arm().expr(), locals);
+            if (value.kind() == ValueKind.VOID) {
+                throw new IllegalStateException("match arm cannot be void");
+            }
+            if (resultType == null) {
+                resultType = value;
+            } else if (!value.matches(new ReturnInfo(resultType.kind(), resultType.structName()))) {
+                throw new IllegalStateException("match arms must return the same type");
+            }
+            mv.visitJumpInsn(Opcodes.GOTO, endLabel);
+        }
+
+        mv.visitLabel(endLabel);
+        if (resultType == null) {
+            throw new IllegalStateException("match must have at least one arm");
+        }
+        return resultType;
+    }
+
+    private void emitMatchCompare(MethodVisitor mv, ExprValue target, int targetSlot, AstMatchPattern pattern, Label matchLabel) {
+        switch (pattern.kind()) {
+            case INT -> {
+                if (target.kind() != ValueKind.INT) {
+                    throw new IllegalStateException("match int pattern used on non-int target");
+                }
+                loadLocal(mv, ValueKind.INT, targetSlot);
+                mv.visitLdcInsn(Integer.parseInt(pattern.value()));
+                mv.visitJumpInsn(Opcodes.IF_ICMPEQ, matchLabel);
+            }
+            case BOOL -> {
+                if (target.kind() != ValueKind.BOOL) {
+                    throw new IllegalStateException("match bool pattern used on non-bool target");
+                }
+                loadLocal(mv, ValueKind.BOOL, targetSlot);
+                boolean boolValue = Boolean.parseBoolean(pattern.value());
+                mv.visitInsn(boolValue ? Opcodes.ICONST_1 : Opcodes.ICONST_0);
+                mv.visitJumpInsn(Opcodes.IF_ICMPEQ, matchLabel);
+            }
+            case STRING -> {
+                if (target.kind() != ValueKind.STRING) {
+                    throw new IllegalStateException("match string pattern used on non-string target");
+                }
+                loadLocal(mv, ValueKind.STRING, targetSlot);
+                mv.visitLdcInsn(pattern.value());
+                mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false);
+                mv.visitJumpInsn(Opcodes.IFNE, matchLabel);
+            }
+            case WILDCARD -> {
+                // handled elsewhere
+            }
+        }
+    }
+
     private ExprValue emitExpr(MethodVisitor mv, AstExpr expr, LocalState locals) {
         if (expr instanceof AstStringExpr stringExpr) {
             mv.visitLdcInsn(stringExpr.literal());
@@ -395,6 +563,9 @@ public final class Codegen {
         }
         if (expr instanceof AstBlockExpr blockExpr) {
             return emitBlockExpr(mv, blockExpr, locals);
+        }
+        if (expr instanceof AstMatchExpr matchExpr) {
+            return emitMatchExpr(mv, matchExpr, locals);
         }
         throw new IllegalStateException("Unsupported expression: " + expr.getClass().getSimpleName());
     }
@@ -807,6 +978,8 @@ public final class Codegen {
 
     private record LoopLabels(Label continueLabel, Label breakLabel) {}
 
+    private record ArmCode(AstMatchArm arm, Label label) {}
+
     private static final class LocalState {
         private final Map<String, Local> locals;
         private final AtomicInteger nextSlot;
@@ -829,6 +1002,10 @@ public final class Codegen {
             int slot = nextSlot.getAndIncrement();
             locals.put(name, new Local(kind, slot, structName));
             return slot;
+        }
+
+        int allocateTemp() {
+            return nextSlot.getAndIncrement();
         }
 
         void define(String name, ValueKind kind, String structName, int slot) {

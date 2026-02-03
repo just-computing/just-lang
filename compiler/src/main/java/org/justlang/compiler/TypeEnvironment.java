@@ -6,11 +6,11 @@ import java.util.List;
 import java.util.Map;
 
 public final class TypeEnvironment {
-    private final Map<String, TypeId> locals = new HashMap<>();
+    private final Map<String, Binding> locals = new HashMap<>();
     private final List<String> errors = new ArrayList<>();
 
-    public void define(String name, TypeId type) {
-        locals.put(name, type);
+    public void define(String name, TypeId type, boolean mutable) {
+        locals.put(name, new Binding(type, mutable));
     }
 
     public TypeEnvironment fork() {
@@ -19,7 +19,7 @@ public final class TypeEnvironment {
         return forked;
     }
 
-    public TypeId lookup(String name) {
+    public Binding lookup(String name) {
         return locals.get(name);
     }
 
@@ -30,4 +30,6 @@ public final class TypeEnvironment {
     public List<String> errors() {
         return errors;
     }
+
+    public record Binding(TypeId type, boolean mutable) {}
 }

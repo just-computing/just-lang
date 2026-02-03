@@ -16,6 +16,9 @@ public final class Lexer {
         "if",
         "else",
         "while",
+        "for",
+        "in",
+        "match",
         "break",
         "continue"
     );
@@ -122,7 +125,17 @@ public final class Lexer {
                 String symbol = null;
                 if (index + 1 < source.length()) {
                     char next = source.charAt(index + 1);
-                    if ((c == '=' || c == '!' || c == '<' || c == '>') && next == '=') {
+                    if (c == '=' && next == '>') {
+                        symbol = "=>";
+                    } else if (c == '.' && next == '.') {
+                        if (index + 2 < source.length() && source.charAt(index + 2) == '=') {
+                            symbol = "..=";
+                        } else {
+                            symbol = "..";
+                        }
+                    } else if ((c == '=' || c == '!' || c == '<' || c == '>') && next == '=') {
+                        symbol = "" + c + next;
+                    } else if ((c == '+' || c == '-' || c == '*' || c == '/') && next == '=') {
                         symbol = "" + c + next;
                     } else if (c == '-' && next == '>') {
                         symbol = "->";
@@ -134,8 +147,9 @@ public final class Lexer {
                 }
                 if (symbol != null) {
                     tokens.add(new Token(Token.TokenKind.SYMBOL, symbol, line, startColumn));
-                    index += 2;
-                    column += 2;
+                    int advance = symbol.length();
+                    index += advance;
+                    column += advance;
                 } else {
                     tokens.add(new Token(Token.TokenKind.SYMBOL, java.lang.String.valueOf(c), line, startColumn));
                     index++;

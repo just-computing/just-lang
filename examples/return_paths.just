@@ -1,0 +1,13 @@
+fn pick(x: i32) -> i32 {
+    if x > 0 {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+
+fn main() {
+    let v = pick(1);
+    std::print(v);
+    return;
+}

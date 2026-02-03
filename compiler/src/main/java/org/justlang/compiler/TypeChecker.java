@@ -98,7 +98,7 @@ public final class TypeChecker {
         List<TypeId> paramTypes = sig.paramTypes();
         for (int i = 0; i < fn.params().size(); i++) {
             TypeId paramType = paramTypes.get(i);
-            locals.define(fn.params().get(i).name(), paramType);
+            locals.define(fn.params().get(i).name(), paramType, false);
         }
 
         TypeId previousReturn = currentReturnType;
@@ -109,7 +109,7 @@ public final class TypeChecker {
         currentReturnType = previousReturn;
 
         if (expectedReturn != TypeId.VOID && !endsWithReturnValue(fn.body())) {
-            diags.addError("Non-void functions must end with return <expr>");
+            diags.addError("Non-void functions must return on all paths");
             success = false;
         }
 
@@ -140,7 +140,43 @@ public final class TypeChecker {
                     success = false;
                     continue;
                 }
-                locals.define(letStmt.name(), exprType);
+                locals.define(letStmt.name(), exprType, letStmt.mutable());
+                continue;
+            }
+            if (stmt instanceof AstAssignStmt assignStmt) {
+                TypeEnvironment.Binding binding = locals.lookup(assignStmt.name());
+                if (binding == null) {
+                    diags.addError("Unknown identifier: " + assignStmt.name());
+                    success = false;
+                    continue;
+                }
+                if (!binding.mutable()) {
+                    diags.addError("Cannot assign to immutable variable: " + assignStmt.name());
+                    success = false;
+                    continue;
+                }
+                TypeId valueType = inferExpr(assignStmt.value(), locals, structs, functions, diags);
+                if (valueType == TypeId.UNKNOWN) {
+                    success = false;
+                    continue;
+                }
+                if (valueType == TypeId.VOID) {
+                    diags.addError("assignment value cannot be void");
+                    success = false;
+                    continue;
+                }
+                String op = assignStmt.operator();
+                if ("=".equals(op)) {
+                    if (!binding.type().equals(valueType)) {
+                        diags.addError("Type mismatch in assignment to " + assignStmt.name());
+                        success = false;
+                    }
+                } else {
+                    if (binding.type() != TypeId.INT || valueType != TypeId.INT) {
+                        diags.addError("Compound assignment requires int operands");
+                        success = false;
+                    }
+                }
                 continue;
             }
             if (stmt instanceof AstExprStmt exprStmt) {
@@ -174,6 +210,22 @@ public final class TypeChecker {
                 }
                 loopDepth++;
                 if (!checkBlock(whileStmt.body(), locals.fork(), structs, functions, expectedReturn, diags)) {
+                    success = false;
+                }
+                loopDepth--;
+                continue;
+            }
+            if (stmt instanceof AstForStmt forStmt) {
+                TypeId startType = inferExpr(forStmt.start(), locals, structs, functions, diags);
+                TypeId endType = inferExpr(forStmt.end(), locals, structs, functions, diags);
+                if (startType != TypeId.INT || endType != TypeId.INT) {
+                    diags.addError("for loop bounds must be int");
+                    success = false;
+                }
+                TypeEnvironment loopLocals = locals.fork();
+                loopLocals.define(forStmt.name(), TypeId.INT, false);
+                loopDepth++;
+                if (!checkBlock(forStmt.body(), loopLocals, structs, functions, expectedReturn, diags)) {
                     success = false;
                 }
                 loopDepth--;
@@ -220,12 +272,21 @@ public final class TypeChecker {
     }
 
     private boolean endsWithReturnValue(List<AstStmt> statements) {
-        if (statements.isEmpty()) {
-            return false;
-        }
-        AstStmt last = statements.get(statements.size() - 1);
-        if (last instanceof AstReturnStmt returnStmt) {
-            return returnStmt.expr() != null;
+        return alwaysReturns(statements);
+    }
+
+    private boolean alwaysReturns(List<AstStmt> statements) {
+        for (AstStmt stmt : statements) {
+            if (stmt instanceof AstReturnStmt returnStmt) {
+                return returnStmt.expr() != null;
+            }
+            if (stmt instanceof AstIfStmt ifStmt) {
+                if (ifStmt.elseBranch() != null
+                    && alwaysReturns(ifStmt.thenBranch())
+                    && alwaysReturns(ifStmt.elseBranch())) {
+                    return true;
+                }
+            }
         }
         return false;
     }
@@ -241,12 +302,12 @@ public final class TypeChecker {
             return TypeId.BOOL;
         }
         if (expr instanceof AstIdentExpr identExpr) {
-            TypeId type = locals.lookup(identExpr.name());
-            if (type == null) {
+            TypeEnvironment.Binding binding = locals.lookup(identExpr.name());
+            if (binding == null) {
                 diags.addError("Unknown identifier: " + identExpr.name());
                 return TypeId.UNKNOWN;
             }
-            return type;
+            return binding.type();
         }
         if (expr instanceof AstStructInitExpr initExpr) {
             StructRegistry.StructDef def = structs.find(initExpr.name());
@@ -339,6 +400,50 @@ public final class TypeChecker {
                 return TypeId.UNKNOWN;
             }
             return valueType;
+        }
+        if (expr instanceof AstMatchExpr matchExpr) {
+            if (matchExpr.arms().isEmpty()) {
+                diags.addError("match requires at least one arm");
+                return TypeId.UNKNOWN;
+            }
+            TypeId targetType = inferExpr(matchExpr.target(), locals, structs, functions, diags);
+            if (targetType == TypeId.UNKNOWN) {
+                return TypeId.UNKNOWN;
+            }
+            if (targetType != TypeId.INT && targetType != TypeId.BOOL && targetType != TypeId.STRING) {
+                diags.addError("match target must be int, bool, or String");
+                return TypeId.UNKNOWN;
+            }
+            boolean hasWildcard = false;
+            TypeId armType = null;
+            for (AstMatchArm arm : matchExpr.arms()) {
+                AstMatchPattern pattern = arm.pattern();
+                if (pattern.kind() == AstMatchPattern.Kind.WILDCARD) {
+                    hasWildcard = true;
+                } else if (!patternMatchesType(pattern, targetType)) {
+                    diags.addError("match pattern does not match target type");
+                    return TypeId.UNKNOWN;
+                }
+                TypeId valueType = inferExpr(arm.expr(), locals, structs, functions, diags);
+                if (valueType == TypeId.UNKNOWN) {
+                    return TypeId.UNKNOWN;
+                }
+                if (valueType == TypeId.VOID) {
+                    diags.addError("match arm cannot be void");
+                    return TypeId.UNKNOWN;
+                }
+                if (armType == null) {
+                    armType = valueType;
+                } else if (!armType.equals(valueType)) {
+                    diags.addError("match arms must return the same type");
+                    return TypeId.UNKNOWN;
+                }
+            }
+            if (!hasWildcard) {
+                diags.addError("match expression requires a '_' wildcard arm");
+                return TypeId.UNKNOWN;
+            }
+            return armType == null ? TypeId.UNKNOWN : armType;
         }
         if (expr instanceof AstPathExpr pathExpr) {
             diags.addError("Unsupported path expression: " + String.join("::", pathExpr.segments()));
@@ -481,5 +586,14 @@ public final class TypeChecker {
         return callExpr.callee().size() == 2
             && "std".equals(callExpr.callee().get(0))
             && "print".equals(callExpr.callee().get(1));
+    }
+
+    private boolean patternMatchesType(AstMatchPattern pattern, TypeId targetType) {
+        return switch (pattern.kind()) {
+            case WILDCARD -> true;
+            case INT -> targetType == TypeId.INT;
+            case BOOL -> targetType == TypeId.BOOL;
+            case STRING -> targetType == TypeId.STRING;
+        };
     }
 }
