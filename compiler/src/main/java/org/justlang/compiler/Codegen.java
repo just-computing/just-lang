@@ -413,7 +413,8 @@ public final class Codegen implements CodegenStrategy {
             if (value.kind() == ValueKind.VOID) {
                 throw new IllegalStateException("Cannot assign void expression to " + assignStmt.name());
             }
-            if (value.kind() != local.kind() || ((value.kind() == ValueKind.STRUCT || value.kind() == ValueKind.ENUM) && !value.structName().equals(local.structName()))) {
+            ExprValue coerced = coerceToExpected(mv, value, new ReturnInfo(local.kind(), local.structName()));
+            if (coerced == null) {
                 throw new IllegalStateException("Type mismatch in assignment to " + assignStmt.name());
             }
             storeLocal(mv, local.kind(), local.slot());
@@ -440,7 +441,8 @@ public final class Codegen implements CodegenStrategy {
 
     private void emitIf(MethodVisitor mv, AstIfStmt ifStmt, LocalState locals, ReturnInfo returnInfo) {
         ExprValue condition = emitExpr(mv, ifStmt.condition(), locals);
-        if (condition.kind() != ValueKind.BOOL) {
+        ExprValue coerced = coerceToExpected(mv, condition, new ReturnInfo(ValueKind.BOOL, null));
+        if (coerced == null) {
             throw new IllegalStateException("if condition must be bool");
         }
         Label elseLabel = new Label();
@@ -516,7 +518,8 @@ public final class Codegen implements CodegenStrategy {
         Label endLabel = new Label();
         mv.visitLabel(startLabel);
         ExprValue condition = emitExpr(mv, whileStmt.condition(), locals);
-        if (condition.kind() != ValueKind.BOOL) {
+        ExprValue coerced = coerceToExpected(mv, condition, new ReturnInfo(ValueKind.BOOL, null));
+        if (coerced == null) {
             throw new IllegalStateException("while condition must be bool");
         }
         mv.visitJumpInsn(Opcodes.IFEQ, endLabel);
@@ -665,7 +668,8 @@ public final class Codegen implements CodegenStrategy {
             throw new IllegalStateException("Missing return value in non-void function");
         }
         ExprValue value = emitExpr(mv, returnStmt.expr(), locals);
-        if (!value.matches(returnInfo)) {
+        ExprValue coerced = coerceToExpected(mv, value, returnInfo);
+        if (coerced == null) {
             throw new IllegalStateException("Return type mismatch");
         }
         mv.visitInsn(switch (returnInfo.kind()) {
@@ -677,7 +681,8 @@ public final class Codegen implements CodegenStrategy {
 
     private ExprValue emitIfExpr(MethodVisitor mv, AstIfExpr ifExpr, LocalState locals) {
         ExprValue condition = emitExpr(mv, ifExpr.condition(), locals);
-        if (condition.kind() != ValueKind.BOOL) {
+        ExprValue coerced = coerceToExpected(mv, condition, new ReturnInfo(ValueKind.BOOL, null));
+        if (coerced == null) {
             throw new IllegalStateException("if expression condition must be bool");
         }
         Label elseLabel = new Label();
@@ -718,11 +723,12 @@ public final class Codegen implements CodegenStrategy {
             throw new IllegalStateException("match target must be int, bool, String, or enum");
         }
         int targetSlot = locals.allocateTemp();
+        int resultSlot = locals.allocateTemp();
         storeLocal(mv, target.kind(), targetSlot);
 
         Label endLabel = new Label();
         Label noMatchLabel = new Label();
-        ExprValue resultType = null;
+        ExprValue resultType = ExprValue.of(ValueKind.ANY);
         boolean hasWildcard = false;
         List<AstMatchArm> arms = matchExpr.arms();
         List<Label> checkLabels = new ArrayList<>();
@@ -759,11 +765,11 @@ public final class Codegen implements CodegenStrategy {
             if (value.kind() == ValueKind.VOID) {
                 throw new IllegalStateException("match arm cannot be void");
             }
-            if (resultType == null) {
-                resultType = value;
-            } else if (!value.matches(new ReturnInfo(resultType.kind(), resultType.structName()))) {
-                throw new IllegalStateException("match arms must return the same type");
+            ExprValue coerced = coerceToExpected(mv, value, new ReturnInfo(ValueKind.ANY, null));
+            if (coerced == null) {
+                throw new IllegalStateException("match arms must return a value");
             }
+            storeLocal(mv, ValueKind.ANY, resultSlot);
             mv.visitJumpInsn(Opcodes.GOTO, endLabel);
             mv.visitLabel(nextCheck);
         }
@@ -782,9 +788,7 @@ public final class Codegen implements CodegenStrategy {
         }
 
         mv.visitLabel(endLabel);
-        if (resultType == null) {
-            throw new IllegalStateException("match must have at least one arm");
-        }
+        loadLocal(mv, ValueKind.ANY, resultSlot);
         return resultType;
     }
 
@@ -957,7 +961,8 @@ public final class Codegen implements CodegenStrategy {
             for (int i = 0; i < call.args().size(); i++) {
                 ExprValue arg = emitExpr(mv, call.args().get(i), locals);
                 ParamInfo param = info.params().get(i);
-                if (!arg.matches(new ReturnInfo(param.kind(), param.structName()))) {
+                ExprValue coerced = coerceToExpected(mv, arg, new ReturnInfo(param.kind(), param.structName()));
+                if (coerced == null) {
                     throw new IllegalStateException("Argument " + (i + 1) + " type mismatch for function " + name);
                 }
             }
@@ -1107,25 +1112,44 @@ public final class Codegen implements CodegenStrategy {
         ExprValue right = emitExpr(mv, binaryExpr.right(), locals);
 
         if ("+".equals(op)) {
+            if (!coerceBinaryIntOperands(mv, left, right)) {
+                throw new IllegalStateException("Arithmetic requires int operands");
+            }
             mv.visitInsn(Opcodes.IADD);
             return ExprValue.of(ValueKind.INT);
         }
         if ("-".equals(op)) {
+            if (!coerceBinaryIntOperands(mv, left, right)) {
+                throw new IllegalStateException("Arithmetic requires int operands");
+            }
             mv.visitInsn(Opcodes.ISUB);
             return ExprValue.of(ValueKind.INT);
         }
         if ("*".equals(op)) {
+            if (!coerceBinaryIntOperands(mv, left, right)) {
+                throw new IllegalStateException("Arithmetic requires int operands");
+            }
             mv.visitInsn(Opcodes.IMUL);
             return ExprValue.of(ValueKind.INT);
         }
         if ("/".equals(op)) {
+            if (!coerceBinaryIntOperands(mv, left, right)) {
+                throw new IllegalStateException("Arithmetic requires int operands");
+            }
             mv.visitInsn(Opcodes.IDIV);
             return ExprValue.of(ValueKind.INT);
         }
         if ("==".equals(op) || "!=".equals(op)) {
+            if (left.kind() == ValueKind.ANY || right.kind() == ValueKind.ANY) {
+                coerceBothToObjectsForEquality(mv, left, right);
+                return emitAnyEquality(mv, op);
+            }
             return emitEquality(mv, op, left);
         }
         if ("<".equals(op) || "<=".equals(op) || ">".equals(op) || ">=".equals(op)) {
+            if (!coerceBinaryIntOperands(mv, left, right)) {
+                throw new IllegalStateException("Comparison requires int operands");
+            }
             return emitComparison(mv, op);
         }
         throw new IllegalStateException("Unsupported binary operator: " + op);
@@ -1135,12 +1159,14 @@ public final class Codegen implements CodegenStrategy {
         Label falseLabel = new Label();
         Label endLabel = new Label();
         ExprValue left = emitExpr(mv, leftExpr, locals);
-        if (left.kind() != ValueKind.BOOL) {
+        ExprValue leftCoerced = coerceToExpected(mv, left, new ReturnInfo(ValueKind.BOOL, null));
+        if (leftCoerced == null) {
             throw new IllegalStateException("Logical && requires bool operands");
         }
         mv.visitJumpInsn(Opcodes.IFEQ, falseLabel);
         ExprValue right = emitExpr(mv, rightExpr, locals);
-        if (right.kind() != ValueKind.BOOL) {
+        ExprValue rightCoerced = coerceToExpected(mv, right, new ReturnInfo(ValueKind.BOOL, null));
+        if (rightCoerced == null) {
             throw new IllegalStateException("Logical && requires bool operands");
         }
         mv.visitJumpInsn(Opcodes.IFEQ, falseLabel);
@@ -1156,12 +1182,14 @@ public final class Codegen implements CodegenStrategy {
         Label trueLabel = new Label();
         Label endLabel = new Label();
         ExprValue left = emitExpr(mv, leftExpr, locals);
-        if (left.kind() != ValueKind.BOOL) {
+        ExprValue leftCoerced = coerceToExpected(mv, left, new ReturnInfo(ValueKind.BOOL, null));
+        if (leftCoerced == null) {
             throw new IllegalStateException("Logical || requires bool operands");
         }
         mv.visitJumpInsn(Opcodes.IFNE, trueLabel);
         ExprValue right = emitExpr(mv, rightExpr, locals);
-        if (right.kind() != ValueKind.BOOL) {
+        ExprValue rightCoerced = coerceToExpected(mv, right, new ReturnInfo(ValueKind.BOOL, null));
+        if (rightCoerced == null) {
             throw new IllegalStateException("Logical || requires bool operands");
         }
         mv.visitJumpInsn(Opcodes.IFNE, trueLabel);
@@ -1198,6 +1226,112 @@ public final class Codegen implements CodegenStrategy {
             opcode = negate ? Opcodes.IF_ICMPNE : Opcodes.IF_ICMPEQ;
         }
         return emitBooleanJump(mv, opcode);
+    }
+
+    private ExprValue emitAnyEquality(MethodVisitor mv, String op) {
+        boolean negate = "!=".equals(op);
+        mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z", false);
+        if (negate) {
+            mv.visitInsn(Opcodes.ICONST_1);
+            mv.visitInsn(Opcodes.IXOR);
+        }
+        return ExprValue.of(ValueKind.BOOL);
+    }
+
+    private boolean coerceBinaryIntOperands(MethodVisitor mv, ExprValue left, ExprValue right) {
+        if (!isIntLike(left.kind()) || !isIntLike(right.kind())) {
+            return false;
+        }
+        if (right.kind() == ValueKind.ANY) {
+            unboxAnyTopToInt(mv);
+        }
+        if (left.kind() == ValueKind.ANY) {
+            mv.visitInsn(Opcodes.SWAP);
+            unboxAnyTopToInt(mv);
+            mv.visitInsn(Opcodes.SWAP);
+        }
+        return true;
+    }
+
+    private void coerceBothToObjectsForEquality(MethodVisitor mv, ExprValue left, ExprValue right) {
+        if (right.kind() == ValueKind.INT) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false);
+        } else if (right.kind() == ValueKind.BOOL) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false);
+        }
+
+        if (left.kind() == ValueKind.INT) {
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false);
+            mv.visitInsn(Opcodes.SWAP);
+        } else if (left.kind() == ValueKind.BOOL) {
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false);
+            mv.visitInsn(Opcodes.SWAP);
+        }
+    }
+
+    private ExprValue coerceToExpected(MethodVisitor mv, ExprValue value, ReturnInfo expected) {
+        if (expected.kind() == ValueKind.ANY) {
+            if (value.kind() == ValueKind.INT) {
+                mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false);
+                return ExprValue.of(ValueKind.ANY);
+            }
+            if (value.kind() == ValueKind.BOOL) {
+                mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false);
+                return ExprValue.of(ValueKind.ANY);
+            }
+            if (value.kind() == ValueKind.STRING || value.kind() == ValueKind.STRUCT || value.kind() == ValueKind.ENUM || value.kind() == ValueKind.ANY) {
+                return ExprValue.of(ValueKind.ANY);
+            }
+            return null;
+        }
+
+        if (value.matches(expected)) {
+            return value;
+        }
+
+        if (value.kind() == ValueKind.ANY) {
+            if (expected.kind() == ValueKind.INT) {
+                unboxAnyTopToInt(mv);
+                return ExprValue.of(ValueKind.INT);
+            }
+            if (expected.kind() == ValueKind.BOOL) {
+                unboxAnyTopToBool(mv);
+                return ExprValue.of(ValueKind.BOOL);
+            }
+            if (expected.kind() == ValueKind.STRING) {
+                mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/String");
+                return ExprValue.of(ValueKind.STRING);
+            }
+            if (expected.kind() == ValueKind.STRUCT || expected.kind() == ValueKind.ENUM) {
+                if (expected.structName() == null) {
+                    return null;
+                }
+                mv.visitTypeInsn(Opcodes.CHECKCAST, expected.structName());
+                return new ExprValue(expected.kind(), expected.structName());
+            }
+            if (expected.kind() == ValueKind.ANY) {
+                return ExprValue.of(ValueKind.ANY);
+            }
+            return null;
+        }
+
+        return null;
+    }
+
+    private boolean isIntLike(ValueKind kind) {
+        return kind == ValueKind.INT || kind == ValueKind.ANY;
+    }
+
+    private void unboxAnyTopToInt(MethodVisitor mv) {
+        mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Integer");
+        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Integer", "intValue", "()I", false);
+    }
+
+    private void unboxAnyTopToBool(MethodVisitor mv) {
+        mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean");
+        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false);
     }
 
     private ExprValue emitComparison(MethodVisitor mv, String op) {
