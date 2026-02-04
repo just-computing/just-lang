@@ -1,9 +1,9 @@
 fn main() {
-    let mut value = 10;
-    value += 5;
-    value -= 2;
-    value *= 3;
-    value /= 2;
-    std::print(value);
+    let mut x = 10;
+    x += 5;
+    x -= 3;
+    x *= 2;
+    x /= 4;
+    std::print(x);
     return;
 }

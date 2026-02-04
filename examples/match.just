@@ -1,9 +1,9 @@
 fn main() {
-    let value = 4;
-    let label = match value {
+    let x = 3;
+    let label = match x {
         0 => "zero",
-        1..=3 => "few",
-        4 => "four",
+        1..=2 => "small",
+        3 => "three",
         _ => "many",
     };
     std::print(label);

@@ -6,6 +6,7 @@ import java.util.List;
 public final class Parser {
     private List<Token> tokens;
     private int current;
+    private boolean allowStructInit = true;
 
     public AstModule parse(List<Token> tokens) {
         this.tokens = tokens;
@@ -253,7 +254,7 @@ public final class Parser {
         }
         if (check(Token.TokenKind.IDENT)) {
             List<String> path = parsePath();
-            if (path.size() == 1 && matchSymbol("{")) {
+            if (allowStructInit && path.size() == 1 && matchSymbol("{")) {
                 List<AstFieldInit> fields = new ArrayList<>();
                 if (!checkSymbol("}")) {
                     do {
@@ -622,7 +623,10 @@ public final class Parser {
     }
 
     private AstExpr parseMatchExpr() {
+        boolean previous = allowStructInit;
+        allowStructInit = false;
         AstExpr target = parseExpr();
+        allowStructInit = previous;
         expectSymbol("{");
         List<AstMatchArm> arms = new ArrayList<>();
         while (!checkSymbol("}") && !isAtEnd()) {
