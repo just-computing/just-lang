@@ -627,7 +627,16 @@ public final class Parser implements ParserStrategy {
     private String parseTypeName() {
         if (check(Token.TokenKind.IDENT)) {
             List<String> path = parsePath();
-            return String.join("::", path);
+            String base = String.join("::", path);
+            if (matchSymbol("<")) {
+                List<String> typeArgs = new ArrayList<>();
+                do {
+                    typeArgs.add(parseTypeName());
+                } while (matchSymbol(","));
+                expectSymbol(">");
+                return base + "<" + String.join(", ", typeArgs) + ">";
+            }
+            return base;
         }
         throw error(peek(), "Expected type name");
     }

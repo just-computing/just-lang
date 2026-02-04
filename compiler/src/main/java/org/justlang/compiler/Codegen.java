@@ -1372,6 +1372,10 @@ public final class Codegen implements CodegenStrategy {
     }
 
     private TypeId resolveTypeName(String name) {
+        TypeId generic = parseGenericType(name);
+        if (generic != null) {
+            return generic;
+        }
         TypeId base = TypeId.fromTypeName(name);
         if (base != TypeId.UNKNOWN) {
             return base;
@@ -1386,6 +1390,10 @@ public final class Codegen implements CodegenStrategy {
     }
 
     private TypeId resolveTypeName(String name, Set<String> knownStructs, Set<String> knownEnums) {
+        TypeId generic = parseGenericType(name, knownStructs, knownEnums);
+        if (generic != null) {
+            return generic;
+        }
         TypeId base = TypeId.fromTypeName(name);
         if (base != TypeId.UNKNOWN) {
             return base;
@@ -1397,6 +1405,67 @@ public final class Codegen implements CodegenStrategy {
             return TypeId.enumType(name);
         }
         return TypeId.UNKNOWN;
+    }
+
+    private TypeId parseGenericType(String name) {
+        String trimmed = name.trim();
+        if (trimmed.startsWith("Option<") && trimmed.endsWith(">")) {
+            String inner = trimmed.substring("Option<".length(), trimmed.length() - 1).trim();
+            TypeId innerType = resolveTypeName(inner);
+            return innerType == TypeId.UNKNOWN ? TypeId.UNKNOWN : TypeId.option(innerType);
+        }
+        if (trimmed.startsWith("Result<") && trimmed.endsWith(">")) {
+            String inside = trimmed.substring("Result<".length(), trimmed.length() - 1).trim();
+            int split = findTopLevelComma(inside);
+            if (split < 0) {
+                return TypeId.UNKNOWN;
+            }
+            TypeId ok = resolveTypeName(inside.substring(0, split).trim());
+            TypeId err = resolveTypeName(inside.substring(split + 1).trim());
+            if (ok == TypeId.UNKNOWN || err == TypeId.UNKNOWN) {
+                return TypeId.UNKNOWN;
+            }
+            return TypeId.result(ok, err);
+        }
+        return null;
+    }
+
+    private TypeId parseGenericType(String name, Set<String> knownStructs, Set<String> knownEnums) {
+        String trimmed = name.trim();
+        if (trimmed.startsWith("Option<") && trimmed.endsWith(">")) {
+            String inner = trimmed.substring("Option<".length(), trimmed.length() - 1).trim();
+            TypeId innerType = resolveTypeName(inner, knownStructs, knownEnums);
+            return innerType == TypeId.UNKNOWN ? TypeId.UNKNOWN : TypeId.option(innerType);
+        }
+        if (trimmed.startsWith("Result<") && trimmed.endsWith(">")) {
+            String inside = trimmed.substring("Result<".length(), trimmed.length() - 1).trim();
+            int split = findTopLevelComma(inside);
+            if (split < 0) {
+                return TypeId.UNKNOWN;
+            }
+            TypeId ok = resolveTypeName(inside.substring(0, split).trim(), knownStructs, knownEnums);
+            TypeId err = resolveTypeName(inside.substring(split + 1).trim(), knownStructs, knownEnums);
+            if (ok == TypeId.UNKNOWN || err == TypeId.UNKNOWN) {
+                return TypeId.UNKNOWN;
+            }
+            return TypeId.result(ok, err);
+        }
+        return null;
+    }
+
+    private int findTopLevelComma(String text) {
+        int depth = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            if (ch == '<') {
+                depth++;
+            } else if (ch == '>') {
+                depth--;
+            } else if (ch == ',' && depth == 0) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private FunctionInfo functionInfoFrom(AstFunction fn, TypeId returnType) {

@@ -637,6 +637,13 @@ public final class TypeChecker implements TypeCheckerStrategy {
             if (segments.size() == 2) {
                 String enumName = segments.get(0);
                 String variantName = segments.get(1);
+                if ("Option".equals(enumName) && "None".equals(variantName)) {
+                    return TypeId.option(TypeId.INFER);
+                }
+                if ("Result".equals(enumName) && ("Ok".equals(variantName) || "Err".equals(variantName))) {
+                    diagnostics.addError("Variant '" + variantName + "' requires a value");
+                    return TypeId.UNKNOWN;
+                }
                 EnumRegistry.EnumDef enumDef = enums.find(enumName);
                 if (enumDef == null) {
                     diagnostics.addError("Unknown enum: " + enumName);
@@ -677,6 +684,53 @@ public final class TypeChecker implements TypeCheckerStrategy {
         if (callExpr.callee().size() == 2) {
             String enumName = callExpr.callee().get(0);
             String variantName = callExpr.callee().get(1);
+            if ("Option".equals(enumName)) {
+                if ("Some".equals(variantName)) {
+                    if (callExpr.args().size() != 1) {
+                        diagnostics.addError("Variant 'Some' expects one argument");
+                        return TypeId.UNKNOWN;
+                    }
+                    TypeId argType = inferExpr(callExpr.args().get(0), locals, structs, enums, functions, diagnostics);
+                    if (argType == TypeId.UNKNOWN || argType == TypeId.VOID) {
+                        diagnostics.addError("Variant 'Some' cannot take void");
+                        return TypeId.UNKNOWN;
+                    }
+                    return TypeId.option(argType);
+                }
+                if ("None".equals(variantName)) {
+                    if (!callExpr.args().isEmpty()) {
+                        diagnostics.addError("Variant 'None' does not take a value");
+                        return TypeId.UNKNOWN;
+                    }
+                    return TypeId.option(TypeId.INFER);
+                }
+            }
+            if ("Result".equals(enumName)) {
+                if ("Ok".equals(variantName)) {
+                    if (callExpr.args().size() != 1) {
+                        diagnostics.addError("Variant 'Ok' expects one argument");
+                        return TypeId.UNKNOWN;
+                    }
+                    TypeId argType = inferExpr(callExpr.args().get(0), locals, structs, enums, functions, diagnostics);
+                    if (argType == TypeId.UNKNOWN || argType == TypeId.VOID) {
+                        diagnostics.addError("Variant 'Ok' cannot take void");
+                        return TypeId.UNKNOWN;
+                    }
+                    return TypeId.result(argType, TypeId.INFER);
+                }
+                if ("Err".equals(variantName)) {
+                    if (callExpr.args().size() != 1) {
+                        diagnostics.addError("Variant 'Err' expects one argument");
+                        return TypeId.UNKNOWN;
+                    }
+                    TypeId argType = inferExpr(callExpr.args().get(0), locals, structs, enums, functions, diagnostics);
+                    if (argType == TypeId.UNKNOWN || argType == TypeId.VOID) {
+                        diagnostics.addError("Variant 'Err' cannot take void");
+                        return TypeId.UNKNOWN;
+                    }
+                    return TypeId.result(TypeId.INFER, argType);
+                }
+            }
             EnumRegistry.EnumDef enumDef = enums.find(enumName);
             if (enumDef == null) {
                 diagnostics.addError("Unknown enum: " + enumName);
@@ -815,6 +869,10 @@ public final class TypeChecker implements TypeCheckerStrategy {
     }
 
     private TypeId resolveTypeName(String name, StructRegistry structs, EnumRegistry enums) {
+        TypeId genericType = parseGenericType(name, structs, enums);
+        if (genericType != null) {
+            return genericType;
+        }
         TypeId base = TypeId.fromTypeName(name);
         if (base != TypeId.UNKNOWN) {
             return base;
@@ -843,10 +901,64 @@ public final class TypeChecker implements TypeCheckerStrategy {
     }
 
     private boolean isAssignable(TypeId expected, TypeId actual) {
+        if (expected == TypeId.INFER || actual == TypeId.INFER) {
+            return true;
+        }
         if (expected == TypeId.ANY) {
             return actual != TypeId.VOID && actual != TypeId.UNKNOWN;
         }
+        if (expected.isOption() && actual.isOption()) {
+            return isAssignable(expected.optionInner(), actual.optionInner());
+        }
+        if (expected.isResult() && actual.isResult()) {
+            return isAssignable(expected.resultOk(), actual.resultOk())
+                && isAssignable(expected.resultErr(), actual.resultErr());
+        }
         return expected.equals(actual);
+    }
+
+    private TypeId parseGenericType(String name, StructRegistry structs, EnumRegistry enums) {
+        String trimmed = name.trim();
+        if (trimmed.startsWith("Option<") && trimmed.endsWith(">")) {
+            String innerText = trimmed.substring("Option<".length(), trimmed.length() - 1).trim();
+            TypeId innerType = resolveTypeName(innerText, structs, enums);
+            return innerType == TypeId.UNKNOWN ? TypeId.UNKNOWN : TypeId.option(innerType);
+        }
+        if (trimmed.startsWith("Result<") && trimmed.endsWith(">")) {
+            String innerText = trimmed.substring("Result<".length(), trimmed.length() - 1).trim();
+            int split = findTopLevelComma(innerText);
+            if (split < 0) {
+                return TypeId.UNKNOWN;
+            }
+            String okText = innerText.substring(0, split).trim();
+            String errText = innerText.substring(split + 1).trim();
+            TypeId okType = resolveTypeName(okText, structs, enums);
+            TypeId errType = resolveTypeName(errText, structs, enums);
+            if (okType == TypeId.UNKNOWN || errType == TypeId.UNKNOWN) {
+                return TypeId.UNKNOWN;
+            }
+            return TypeId.result(okType, errType);
+        }
+        return null;
+    }
+
+    private int findTopLevelComma(String text) {
+        int depth = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            if (ch == '<') {
+                depth++;
+                continue;
+            }
+            if (ch == '>') {
+                depth--;
+                continue;
+            }
+            if (ch == ',' && depth == 0) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private boolean isPrintCall(AstCallExpr callExpr) {
@@ -912,6 +1024,14 @@ public final class TypeChecker implements TypeCheckerStrategy {
     }
 
     private boolean patternMatchesType(AstMatchPattern pattern, TypeId targetType, EnumRegistry enums) {
+        if (pattern.kind() == AstMatchPattern.Kind.ENUM && targetType.isOption()) {
+            return "Option".equals(pattern.enumName())
+                && ("Some".equals(pattern.variantName()) || "None".equals(pattern.variantName()));
+        }
+        if (pattern.kind() == AstMatchPattern.Kind.ENUM && targetType.isResult()) {
+            return "Result".equals(pattern.enumName())
+                && ("Ok".equals(pattern.variantName()) || "Err".equals(pattern.variantName()));
+        }
         return switch (pattern.kind()) {
             case WILDCARD -> true;
             case INT -> targetType == TypeId.INT;
@@ -936,6 +1056,47 @@ public final class TypeChecker implements TypeCheckerStrategy {
     }
 
     private boolean bindEnumPattern(AstMatchPattern pattern, TypeId targetType, TypeEnvironment locals, StructRegistry structs, EnumRegistry enums, TypeEnvironment diagnostics) {
+        if (targetType.isOption()) {
+            if (!"Option".equals(pattern.enumName())) {
+                diagnostics.addError("enum pattern does not match target enum");
+                return false;
+            }
+            if ("None".equals(pattern.variantName())) {
+                if (pattern.binding() != null) {
+                    diagnostics.addError("Variant 'None' does not bind a value");
+                    return false;
+                }
+                return true;
+            }
+            if (!"Some".equals(pattern.variantName())) {
+                diagnostics.addError("Unknown variant '" + pattern.variantName() + "' on enum Option");
+                return false;
+            }
+            if (pattern.binding() != null) {
+                locals.define(pattern.binding(), targetType.optionInner(), false);
+            }
+            return true;
+        }
+        if (targetType.isResult()) {
+            if (!"Result".equals(pattern.enumName())) {
+                diagnostics.addError("enum pattern does not match target enum");
+                return false;
+            }
+            if ("Ok".equals(pattern.variantName())) {
+                if (pattern.binding() != null) {
+                    locals.define(pattern.binding(), targetType.resultOk(), false);
+                }
+                return true;
+            }
+            if ("Err".equals(pattern.variantName())) {
+                if (pattern.binding() != null) {
+                    locals.define(pattern.binding(), targetType.resultErr(), false);
+                }
+                return true;
+            }
+            diagnostics.addError("Unknown variant '" + pattern.variantName() + "' on enum Result");
+            return false;
+        }
         if (!targetType.isEnum()) {
             diagnostics.addError("enum pattern used on non-enum type");
             return false;

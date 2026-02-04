@@ -1237,6 +1237,268 @@ public class TypeCheckerTest {
         assertTrue(diagnostics2.errors().stream().anyMatch(err -> err.contains("Unknown variant 'Missing' on enum A")));
     }
 
+    @Test
+    void optionGenericTypeAnnotationsWork() {
+        TypeResult result = typeCheck("""
+            fn unwrap_or_zero(x: Option<i32>) -> i32 {
+                let out = match x {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                };
+                return out;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void optionNoneCanFlowIntoTypedOption() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let x: Option<i32> = Option::None;
+                let y: Option<i32> = Option::Some(1);
+                std::print(match x { Option::Some(v) => v, Option::None => 0 });
+                std::print(match y { Option::Some(v) => v, Option::None => 0 });
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void optionGenericMismatchFails() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let x: Option<bool> = Option::Some(1);
+                std::print(x);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Type mismatch in let binding")));
+    }
+
+    @Test
+    void resultGenericAnnotationsWork() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let ok: Result<i32, String> = Result::Ok(1);
+                let err: Result<i32, String> = Result::Err("boom");
+                std::print(match ok { Result::Ok(v) => v, Result::Err(_) => 0 });
+                std::print(match err { Result::Ok(v) => v, Result::Err(_) => 0 });
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void optionAndResultConstructorValidationErrors() {
+        TypeResult result = typeCheck("""
+            fn noop() { return; }
+            fn main() {
+                let a = Option::Some();
+                let b = Option::None(1);
+                let c = Result::Ok();
+                let d = Result::Err();
+                let e = Result::Err(noop());
+                std::print(a);
+                std::print(b);
+                std::print(c);
+                std::print(d);
+                std::print(e);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Variant 'Some' expects one argument")));
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Variant 'None' does not take a value")));
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Variant 'Ok' expects one argument")));
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Variant 'Err' expects one argument")));
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Variant 'Err' cannot take void")));
+    }
+
+    @Test
+    void optionNonePatternCannotBindValue() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let x: Option<i32> = Option::None;
+                if let Option::None(v) = x {
+                    std::print(v);
+                }
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Variant 'None' does not bind a value")));
+    }
+
+    @Test
+    void malformedResultGenericTypeFails() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let x: Result<i32> = Result::Ok(1);
+                std::print(x);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Unknown type: Result<i32>")));
+    }
+
+    @Test
+    void nestedGenericTypeParsesAndTypeChecks() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let x: Result<Option<i32>, Result<i32, String>> = Result::Ok(Option::Some(1));
+                std::print(x);
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void optionNoneFunctionCallAndResultOkVoidValidation() {
+        TypeResult result = typeCheck("""
+            fn noop() { return; }
+            fn main() {
+                let a: Option<i32> = Option::None();
+                let b = Result::Ok(noop());
+                std::print(a);
+                std::print(b);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Variant 'Ok' cannot take void")));
+    }
+
+    @Test
+    void internalPatternMatchHelpersCoverEdgeBranches() throws Exception {
+        TypeChecker checker = new TypeChecker();
+
+        Method patternMatches = TypeChecker.class.getDeclaredMethod(
+            "patternMatchesType",
+            AstMatchPattern.class,
+            TypeId.class,
+            EnumRegistry.class
+        );
+        patternMatches.setAccessible(true);
+
+        Method bind = TypeChecker.class.getDeclaredMethod(
+            "bindEnumPattern",
+            AstMatchPattern.class,
+            TypeId.class,
+            TypeEnvironment.class,
+            StructRegistry.class,
+            EnumRegistry.class,
+            TypeEnvironment.class
+        );
+        bind.setAccessible(true);
+
+        EnumRegistry enums = new EnumRegistry();
+        enums.register(new AstEnum("E", List.of(new AstEnumVariant("A", null))));
+
+        boolean wildcardMatch = (boolean) patternMatches.invoke(
+            checker,
+            AstMatchPattern.wildcard(),
+            TypeId.INT,
+            enums
+        );
+        assertTrue(wildcardMatch);
+
+        boolean enumMismatch = (boolean) patternMatches.invoke(
+            checker,
+            AstMatchPattern.enumVariant("X", "A", null),
+            TypeId.enumType("E"),
+            enums
+        );
+        assertFalse(enumMismatch);
+
+        boolean enumUnknownVariant = (boolean) patternMatches.invoke(
+            checker,
+            AstMatchPattern.enumVariant("E", "Missing", null),
+            TypeId.enumType("E"),
+            enums
+        );
+        assertFalse(enumUnknownVariant);
+
+        TypeEnvironment diagnostics = new TypeEnvironment();
+        boolean optionMismatch = (boolean) bind.invoke(
+            checker,
+            AstMatchPattern.enumVariant("Result", "Ok", null),
+            TypeId.option(TypeId.INT),
+            new TypeEnvironment(),
+            new StructRegistry(),
+            enums,
+            diagnostics
+        );
+        assertFalse(optionMismatch);
+        assertTrue(diagnostics.errors().stream().anyMatch(err -> err.contains("enum pattern does not match target enum")));
+
+        TypeEnvironment diagnostics2 = new TypeEnvironment();
+        boolean optionUnknownVariant = (boolean) bind.invoke(
+            checker,
+            AstMatchPattern.enumVariant("Option", "Other", null),
+            TypeId.option(TypeId.INT),
+            new TypeEnvironment(),
+            new StructRegistry(),
+            enums,
+            diagnostics2
+        );
+        assertFalse(optionUnknownVariant);
+        assertTrue(diagnostics2.errors().stream().anyMatch(err -> err.contains("Unknown variant 'Other' on enum Option")));
+
+        TypeEnvironment diagnostics3 = new TypeEnvironment();
+        boolean resultMismatch = (boolean) bind.invoke(
+            checker,
+            AstMatchPattern.enumVariant("Option", "Some", null),
+            TypeId.result(TypeId.INT, TypeId.STRING),
+            new TypeEnvironment(),
+            new StructRegistry(),
+            enums,
+            diagnostics3
+        );
+        assertFalse(resultMismatch);
+        assertTrue(diagnostics3.errors().stream().anyMatch(err -> err.contains("enum pattern does not match target enum")));
+
+        TypeEnvironment diagnostics4 = new TypeEnvironment();
+        boolean resultUnknownVariant = (boolean) bind.invoke(
+            checker,
+            AstMatchPattern.enumVariant("Result", "Other", null),
+            TypeId.result(TypeId.INT, TypeId.STRING),
+            new TypeEnvironment(),
+            new StructRegistry(),
+            enums,
+            diagnostics4
+        );
+        assertFalse(resultUnknownVariant);
+        assertTrue(diagnostics4.errors().stream().anyMatch(err -> err.contains("Unknown variant 'Other' on enum Result")));
+
+        TypeEnvironment diagnostics5 = new TypeEnvironment();
+        boolean unknownEnum = (boolean) bind.invoke(
+            checker,
+            AstMatchPattern.enumVariant("Ghost", "A", null),
+            TypeId.enumType("Ghost"),
+            new TypeEnvironment(),
+            new StructRegistry(),
+            new EnumRegistry(),
+            diagnostics5
+        );
+        assertFalse(unknownEnum);
+        assertTrue(diagnostics5.errors().stream().anyMatch(err -> err.contains("Unknown enum: Ghost")));
+    }
+
     private TypeResult typeCheck(String source) {
         Diagnostics diagnostics = new Diagnostics();
         SourceFile sourceFile = new SourceFile(Path.of("test.just"), source);
