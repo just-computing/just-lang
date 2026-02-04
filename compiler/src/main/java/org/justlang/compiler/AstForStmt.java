@@ -3,18 +3,24 @@ package org.justlang.compiler;
 import java.util.List;
 
 public final class AstForStmt implements AstStmt {
+    private final String label;
     private final String name;
     private final AstExpr start;
     private final AstExpr end;
     private final boolean inclusive;
     private final List<AstStmt> body;
 
-    public AstForStmt(String name, AstExpr start, AstExpr end, boolean inclusive, List<AstStmt> body) {
+    public AstForStmt(String label, String name, AstExpr start, AstExpr end, boolean inclusive, List<AstStmt> body) {
+        this.label = label;
         this.name = name;
         this.start = start;
         this.end = end;
         this.inclusive = inclusive;
         this.body = body;
+    }
+
+    public String label() {
+        return label;
     }
 
     public String name() {

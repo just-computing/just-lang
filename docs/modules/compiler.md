@@ -40,3 +40,11 @@ Parses Just source, performs name/type/borrow analysis, lowers to IR, monomorphi
 - `.jar` file with generated JVM classes
 - `Diagnostics` for errors/warnings
 
+## Current Language Surface (Prototype)
+
+- Functions with typed parameters and return types (`fn add(a: i32, b: i32) -> i32`).
+- `if` / `else if` / `else` statements and `if` expressions.
+- `while`, `for i in 0..N` / `0..=N`, and `loop {}` (infinite loop).
+- `break`, `break <expr>` (loop expressions only), `continue`, and optional loop labels (`'outer:`).
+- `match` expression with literal patterns (`int`, `bool`, `String`), range patterns (`1..=5`), and `_` wildcard.
+- Assignments (`=`) and compound assignments (`+=`, `-=`, `*=`, `/=`) for `i32`.

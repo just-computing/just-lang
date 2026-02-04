@@ -35,6 +35,9 @@ public final class JustCompiler {
                 java.util.List<Token> tokens = lexer.lex(source);
                 AstModule module = parser.parse(tokens);
                 TypeResult typeResult = typeChecker.typeCheck(module);
+                for (String warning : typeResult.environment().warnings()) {
+                    diagnostics.add(new Diagnostic("warning: " + warning, source.path()));
+                }
                 if (!typeResult.success()) {
                     for (String error : typeResult.environment().errors()) {
                         diagnostics.add(new Diagnostic(error, source.path()));

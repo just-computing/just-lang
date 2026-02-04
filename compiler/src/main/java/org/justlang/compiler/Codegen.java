@@ -19,7 +19,7 @@ public final class Codegen {
     private static final String MAIN_INTERNAL_NAME = "Main";
     private final Map<String, StructLayout> structLayouts = new HashMap<>();
     private final Map<String, FunctionInfo> functions = new HashMap<>();
-    private final Deque<LoopLabels> loopStack = new ArrayDeque<>();
+    private final Deque<LoopContext> loopStack = new ArrayDeque<>();
     private ReturnInfo currentReturnInfo;
 
     public List<ClassFile> emit(AstModule module) {
@@ -211,6 +211,10 @@ public final class Codegen {
             emitFor(mv, forStmt, locals, returnInfo);
             return;
         }
+        if (stmt instanceof AstLoopStmt loopStmt) {
+            emitLoopStmt(mv, loopStmt, locals, returnInfo);
+            return;
+        }
         if (stmt instanceof AstWhileStmt whileStmt) {
             emitWhile(mv, whileStmt, locals, returnInfo);
             return;
@@ -219,12 +223,12 @@ public final class Codegen {
             emitAssign(mv, assignStmt, locals);
             return;
         }
-        if (stmt instanceof AstBreakStmt) {
-            emitBreak(mv);
+        if (stmt instanceof AstBreakStmt breakStmt) {
+            emitBreak(mv, breakStmt, locals);
             return;
         }
-        if (stmt instanceof AstContinueStmt) {
-            emitContinue(mv);
+        if (stmt instanceof AstContinueStmt continueStmt) {
+            emitContinue(mv, continueStmt);
             return;
         }
         if (stmt instanceof AstReturnStmt returnStmt) {
@@ -315,7 +319,7 @@ public final class Codegen {
             throw new IllegalStateException("while condition must be bool");
         }
         mv.visitJumpInsn(Opcodes.IFEQ, endLabel);
-        loopStack.push(new LoopLabels(startLabel, endLabel));
+        loopStack.push(new LoopContext(whileStmt.label(), startLabel, endLabel, false, -1));
         emitBlock(mv, whileStmt.body(), locals.fork(), returnInfo);
         loopStack.pop();
         mv.visitJumpInsn(Opcodes.GOTO, startLabel);
@@ -348,7 +352,7 @@ public final class Codegen {
         int jumpOp = forStmt.inclusive() ? Opcodes.IF_ICMPGT : Opcodes.IF_ICMPGE;
         mv.visitJumpInsn(jumpOp, endLabel);
 
-        loopStack.push(new LoopLabels(continueLabel, endLabel));
+        loopStack.push(new LoopContext(forStmt.label(), continueLabel, endLabel, false, -1));
         emitBlock(mv, forStmt.body(), loopLocals.fork(), returnInfo);
         loopStack.pop();
 
@@ -361,20 +365,91 @@ public final class Codegen {
         mv.visitLabel(endLabel);
     }
 
-    private void emitBreak(MethodVisitor mv) {
-        LoopLabels labels = loopStack.peek();
-        if (labels == null) {
-            throw new IllegalStateException("break is only valid inside loops");
-        }
-        mv.visitJumpInsn(Opcodes.GOTO, labels.breakLabel());
+    private void emitLoopStmt(MethodVisitor mv, AstLoopStmt loopStmt, LocalState locals, ReturnInfo returnInfo) {
+        Label startLabel = new Label();
+        Label endLabel = new Label();
+        mv.visitLabel(startLabel);
+        loopStack.push(new LoopContext(loopStmt.label(), startLabel, endLabel, false, -1));
+        emitBlock(mv, loopStmt.body(), locals.fork(), returnInfo);
+        loopStack.pop();
+        mv.visitJumpInsn(Opcodes.GOTO, startLabel);
+        mv.visitLabel(endLabel);
     }
 
-    private void emitContinue(MethodVisitor mv) {
-        LoopLabels labels = loopStack.peek();
-        if (labels == null) {
+    private ExprValue emitLoopExpr(MethodVisitor mv, AstLoopExpr loopExpr, LocalState locals) {
+        if (currentReturnInfo == null) {
+            throw new IllegalStateException("Missing return context for loop expression");
+        }
+        Label startLabel = new Label();
+        Label continueLabel = new Label();
+        Label endLabel = new Label();
+        int resultSlot = locals.allocateTemp();
+
+        LoopContext context = new LoopContext(null, continueLabel, endLabel, true, resultSlot);
+        loopStack.push(context);
+
+        mv.visitLabel(startLabel);
+        emitBlock(mv, loopExpr.body(), locals.fork(), currentReturnInfo);
+        mv.visitLabel(continueLabel);
+        mv.visitJumpInsn(Opcodes.GOTO, startLabel);
+        mv.visitLabel(endLabel);
+
+        loopStack.pop();
+
+        if (context.resultKind == null) {
+            throw new IllegalStateException("loop expression requires break with value");
+        }
+        loadLocal(mv, context.resultKind, resultSlot);
+        return new ExprValue(context.resultKind, context.resultStructName);
+    }
+
+    private void emitBreak(MethodVisitor mv, AstBreakStmt breakStmt, LocalState locals) {
+        LoopContext context = resolveLoopContext(breakStmt.label(), "break");
+        if (context == null) {
+            throw new IllegalStateException("break is only valid inside loops");
+        }
+        if (breakStmt.expr() != null) {
+            if (!context.valueLoop) {
+                throw new IllegalStateException("break with value is only allowed in loop expressions");
+            }
+            ExprValue value = emitExpr(mv, breakStmt.expr(), locals);
+            if (value.kind() == ValueKind.VOID) {
+                throw new IllegalStateException("break value cannot be void");
+            }
+            if (context.resultKind == null) {
+                context.resultKind = value.kind();
+                context.resultStructName = value.structName();
+            } else if (!value.matches(new ReturnInfo(context.resultKind, context.resultStructName))) {
+                throw new IllegalStateException("break values must match in loop expression");
+            }
+            storeLocal(mv, value.kind(), context.resultSlot);
+        } else if (context.valueLoop) {
+            throw new IllegalStateException("break value required for loop expression");
+        }
+        mv.visitJumpInsn(Opcodes.GOTO, context.breakLabel);
+    }
+
+    private void emitContinue(MethodVisitor mv, AstContinueStmt continueStmt) {
+        LoopContext context = resolveLoopContext(continueStmt.label(), "continue");
+        if (context == null) {
             throw new IllegalStateException("continue is only valid inside loops");
         }
-        mv.visitJumpInsn(Opcodes.GOTO, labels.continueLabel());
+        mv.visitJumpInsn(Opcodes.GOTO, context.continueLabel);
+    }
+
+    private LoopContext resolveLoopContext(String label, String keyword) {
+        if (loopStack.isEmpty()) {
+            return null;
+        }
+        if (label == null) {
+            return loopStack.peek();
+        }
+        for (LoopContext context : loopStack) {
+            if (label.equals(context.label)) {
+                return context;
+            }
+        }
+        throw new IllegalStateException("Unknown loop label '" + label + "' for " + keyword);
     }
 
     private void emitReturn(MethodVisitor mv, AstReturnStmt returnStmt, LocalState locals, ReturnInfo returnInfo) {
@@ -447,6 +522,7 @@ public final class Codegen {
         Label endLabel = new Label();
         ExprValue resultType = null;
         Label defaultLabel = null;
+        boolean hasWildcard = false;
 
         List<ArmCode> arms = new ArrayList<>();
         for (AstMatchArm arm : matchExpr.arms()) {
@@ -455,13 +531,14 @@ public final class Codegen {
             AstMatchPattern pattern = arm.pattern();
             if (pattern.kind() == AstMatchPattern.Kind.WILDCARD) {
                 defaultLabel = label;
+                hasWildcard = true;
                 continue;
             }
             emitMatchCompare(mv, target, targetSlot, pattern, label);
         }
 
         if (defaultLabel == null) {
-            throw new IllegalStateException("match requires a wildcard '_' arm");
+            defaultLabel = new Label();
         }
 
         mv.visitJumpInsn(Opcodes.GOTO, defaultLabel);
@@ -478,6 +555,15 @@ public final class Codegen {
                 throw new IllegalStateException("match arms must return the same type");
             }
             mv.visitJumpInsn(Opcodes.GOTO, endLabel);
+        }
+
+        if (!hasWildcard) {
+            mv.visitLabel(defaultLabel);
+            mv.visitTypeInsn(Opcodes.NEW, "java/lang/IllegalStateException");
+            mv.visitInsn(Opcodes.DUP);
+            mv.visitLdcInsn("Non-exhaustive match");
+            mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/IllegalStateException", "<init>", "(Ljava/lang/String;)V", false);
+            mv.visitInsn(Opcodes.ATHROW);
         }
 
         mv.visitLabel(endLabel);
@@ -514,6 +600,22 @@ public final class Codegen {
                 mv.visitLdcInsn(pattern.value());
                 mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false);
                 mv.visitJumpInsn(Opcodes.IFNE, matchLabel);
+            }
+            case RANGE -> {
+                if (target.kind() != ValueKind.INT) {
+                    throw new IllegalStateException("match range pattern used on non-int target");
+                }
+                int start = Integer.parseInt(pattern.rangeStart());
+                int end = Integer.parseInt(pattern.rangeEnd());
+                Label fail = new Label();
+                loadLocal(mv, ValueKind.INT, targetSlot);
+                mv.visitLdcInsn(start);
+                mv.visitJumpInsn(Opcodes.IF_ICMPLT, fail);
+                loadLocal(mv, ValueKind.INT, targetSlot);
+                mv.visitLdcInsn(end);
+                int jumpOp = pattern.inclusive() ? Opcodes.IF_ICMPLE : Opcodes.IF_ICMPLT;
+                mv.visitJumpInsn(jumpOp, matchLabel);
+                mv.visitLabel(fail);
             }
             case WILDCARD -> {
                 // handled elsewhere
@@ -566,6 +668,9 @@ public final class Codegen {
         }
         if (expr instanceof AstMatchExpr matchExpr) {
             return emitMatchExpr(mv, matchExpr, locals);
+        }
+        if (expr instanceof AstLoopExpr loopExpr) {
+            return emitLoopExpr(mv, loopExpr, locals);
         }
         throw new IllegalStateException("Unsupported expression: " + expr.getClass().getSimpleName());
     }
@@ -976,9 +1081,25 @@ public final class Codegen {
 
     private record ReturnInfo(ValueKind kind, String structName) {}
 
-    private record LoopLabels(Label continueLabel, Label breakLabel) {}
-
     private record ArmCode(AstMatchArm arm, Label label) {}
+
+    private static final class LoopContext {
+        private final String label;
+        private final Label continueLabel;
+        private final Label breakLabel;
+        private final boolean valueLoop;
+        private final int resultSlot;
+        private ValueKind resultKind;
+        private String resultStructName;
+
+        private LoopContext(String label, Label continueLabel, Label breakLabel, boolean valueLoop, int resultSlot) {
+            this.label = label;
+            this.continueLabel = continueLabel;
+            this.breakLabel = breakLabel;
+            this.valueLoop = valueLoop;
+            this.resultSlot = resultSlot;
+        }
+    }
 
     private static final class LocalState {
         private final Map<String, Local> locals;

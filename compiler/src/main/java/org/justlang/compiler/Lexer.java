@@ -18,6 +18,7 @@ public final class Lexer {
         "while",
         "for",
         "in",
+        "loop",
         "match",
         "break",
         "continue"
@@ -174,6 +175,6 @@ public final class Lexer {
     }
 
     private static boolean isSymbolStart(char c) {
-        return "(){}[],;=:+-*/&<>.!|".indexOf(c) >= 0;
+        return "(){}[],;=:+-*/&<>.!|'".indexOf(c) >= 0;
     }
 }

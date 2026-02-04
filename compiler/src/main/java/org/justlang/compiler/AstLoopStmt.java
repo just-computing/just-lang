@@ -2,23 +2,17 @@ package org.justlang.compiler;
 
 import java.util.List;
 
-public final class AstWhileStmt implements AstStmt {
+public final class AstLoopStmt implements AstStmt {
     private final String label;
-    private final AstExpr condition;
     private final List<AstStmt> body;
 
-    public AstWhileStmt(String label, AstExpr condition, List<AstStmt> body) {
+    public AstLoopStmt(String label, List<AstStmt> body) {
         this.label = label;
-        this.condition = condition;
         this.body = body;
     }
 
     public String label() {
         return label;
-    }
-
-    public AstExpr condition() {
-        return condition;
     }
 
     public List<AstStmt> body() {

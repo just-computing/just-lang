@@ -49,22 +49,37 @@ public final class Parser {
     }
 
     private AstStmt parseStatement() {
+        if (checkSymbol("'")) {
+            String label = parseLabel();
+            expectSymbol(":");
+            if (matchKeyword("for")) {
+                return parseFor(label);
+            }
+            if (matchKeyword("while")) {
+                return parseWhile(label);
+            }
+            if (matchKeyword("loop")) {
+                return parseLoopStmt(label);
+            }
+            throw error(peek(), "Labels can only be applied to loops");
+        }
         if (matchKeyword("if")) {
             return parseIf();
         }
         if (matchKeyword("for")) {
-            return parseFor();
+            return parseFor(null);
+        }
+        if (matchKeyword("loop")) {
+            return parseLoopStmt(null);
         }
         if (matchKeyword("while")) {
-            return parseWhile();
+            return parseWhile(null);
         }
         if (matchKeyword("break")) {
-            expectSymbol(";");
-            return new AstBreakStmt();
+            return parseBreak();
         }
         if (matchKeyword("continue")) {
-            expectSymbol(";");
-            return new AstContinueStmt();
+            return parseContinue();
         }
         if (matchKeyword("return")) {
             return parseReturn();
@@ -218,6 +233,9 @@ public final class Parser {
         if (matchKeyword("match")) {
             return parseMatchExpr();
         }
+        if (matchKeyword("loop")) {
+            return parseLoopExpr();
+        }
         if (matchKeyword("if")) {
             return parseIfExpr();
         }
@@ -297,13 +315,13 @@ public final class Parser {
         return new AstIfStmt(condition, thenBranch, elseBranch);
     }
 
-    private AstStmt parseWhile() {
+    private AstStmt parseWhile(String label) {
         AstExpr condition = parseExpr();
         List<AstStmt> body = parseBlock();
-        return new AstWhileStmt(condition, body);
+        return new AstWhileStmt(label, condition, body);
     }
 
-    private AstStmt parseFor() {
+    private AstStmt parseFor(String label) {
         Token name = expect(Token.TokenKind.IDENT, "Expected loop variable name");
         if (!matchKeyword("in")) {
             throw error(peek(), "Expected 'in' after loop variable");
@@ -318,7 +336,7 @@ public final class Parser {
         }
         AstExpr end = parseExpr();
         List<AstStmt> body = parseBlock();
-        return new AstForStmt(name.lexeme(), start, end, inclusive, body);
+        return new AstForStmt(label, name.lexeme(), start, end, inclusive, body);
     }
 
     private AstExpr parseIfExpr() {
@@ -327,7 +345,12 @@ public final class Parser {
         if (!matchKeyword("else")) {
             throw error(peek(), "if expression requires else");
         }
-        AstExpr elseExpr = parseBlockExpr();
+        AstExpr elseExpr;
+        if (matchKeyword("if")) {
+            elseExpr = parseIfExpr();
+        } else {
+            elseExpr = parseBlockExpr();
+        }
         return new AstIfExpr(condition, thenExpr, elseExpr);
     }
 
@@ -336,30 +359,45 @@ public final class Parser {
         List<AstStmt> statements = new ArrayList<>();
         AstExpr value = null;
         while (!checkSymbol("}") && !isAtEnd()) {
+            if (checkSymbol("'")) {
+                String label = parseLabel();
+                expectSymbol(":");
+                if (matchKeyword("for")) {
+                    statements.add(parseFor(label));
+                    continue;
+                }
+                if (matchKeyword("while")) {
+                    statements.add(parseWhile(label));
+                    continue;
+                }
+                if (matchKeyword("loop")) {
+                    statements.add(parseLoopStmt(label));
+                    continue;
+                }
+                throw error(peek(), "Labels can only be applied to loops");
+            }
             if (matchKeyword("let")) {
                 statements.add(parseLet());
                 continue;
             }
             if (matchKeyword("for")) {
-                statements.add(parseFor());
+                statements.add(parseFor(null));
                 continue;
             }
-            if (matchKeyword("if")) {
-                statements.add(parseIf());
+            if (matchKeyword("loop")) {
+                statements.add(parseLoopStmt(null));
                 continue;
             }
             if (matchKeyword("while")) {
-                statements.add(parseWhile());
+                statements.add(parseWhile(null));
                 continue;
             }
             if (matchKeyword("break")) {
-                expectSymbol(";");
-                statements.add(new AstBreakStmt());
+                statements.add(parseBreak());
                 continue;
             }
             if (matchKeyword("continue")) {
-                expectSymbol(";");
-                statements.add(new AstContinueStmt());
+                statements.add(parseContinue());
                 continue;
             }
             if (matchKeyword("return")) {
@@ -369,6 +407,15 @@ public final class Parser {
             if (checkAssignment()) {
                 statements.add(parseAssign());
                 continue;
+            }
+            if (matchKeyword("if")) {
+                AstExpr ifExpr = parseIfExpr();
+                if (matchSymbol(";")) {
+                    statements.add(new AstExprStmt(ifExpr));
+                    continue;
+                }
+                value = ifExpr;
+                break;
             }
             AstExpr expr = parseExpr();
             if (matchSymbol(";")) {
@@ -404,6 +451,40 @@ public final class Parser {
         AstExpr value = parseExpr();
         expectSymbol(";");
         return new AstAssignStmt(name.lexeme(), operator, value);
+    }
+
+    private AstStmt parseBreak() {
+        String label = null;
+        if (matchSymbol("'")) {
+            Token labelToken = expect(Token.TokenKind.IDENT, "Expected label after '''");
+            label = labelToken.lexeme();
+        }
+        AstExpr expr = null;
+        if (!checkSymbol(";")) {
+            expr = parseExpr();
+        }
+        expectSymbol(";");
+        return new AstBreakStmt(label, expr);
+    }
+
+    private AstStmt parseContinue() {
+        String label = null;
+        if (matchSymbol("'")) {
+            Token labelToken = expect(Token.TokenKind.IDENT, "Expected label after '''");
+            label = labelToken.lexeme();
+        }
+        expectSymbol(";");
+        return new AstContinueStmt(label);
+    }
+
+    private AstExpr parseLoopExpr() {
+        List<AstStmt> body = parseBlock();
+        return new AstLoopExpr(body);
+    }
+
+    private AstStmt parseLoopStmt(String label) {
+        List<AstStmt> body = parseBlock();
+        return new AstLoopStmt(label, body);
     }
 
     private AstStmt parseReturn() {
@@ -534,6 +615,12 @@ public final class Parser {
                 || "/=".equals(next.lexeme()));
     }
 
+    private String parseLabel() {
+        expectSymbol("'");
+        Token label = expect(Token.TokenKind.IDENT, "Expected label name");
+        return label.lexeme();
+    }
+
     private AstExpr parseMatchExpr() {
         AstExpr target = parseExpr();
         expectSymbol("{");
@@ -563,21 +650,30 @@ public final class Parser {
         if (check(Token.TokenKind.IDENT)) {
             Token ident = advance();
             if ("_".equals(ident.lexeme())) {
-                return new AstMatchPattern(AstMatchPattern.Kind.WILDCARD, "_");
+                return AstMatchPattern.wildcard();
             }
             throw error(ident, "Only '_' wildcard identifier is supported in match patterns");
         }
         if (matchKeyword("true")) {
-            return new AstMatchPattern(AstMatchPattern.Kind.BOOL, "true");
+            return AstMatchPattern.boolLiteral("true");
         }
         if (matchKeyword("false")) {
-            return new AstMatchPattern(AstMatchPattern.Kind.BOOL, "false");
+            return AstMatchPattern.boolLiteral("false");
         }
         if (match(Token.TokenKind.NUMBER)) {
-            return new AstMatchPattern(AstMatchPattern.Kind.INT, previous().lexeme());
+            String start = previous().lexeme();
+            if (matchSymbol("..=")) {
+                Token end = expect(Token.TokenKind.NUMBER, "Expected range end");
+                return AstMatchPattern.range(start, end.lexeme(), true);
+            }
+            if (matchSymbol("..")) {
+                Token end = expect(Token.TokenKind.NUMBER, "Expected range end");
+                return AstMatchPattern.range(start, end.lexeme(), false);
+            }
+            return AstMatchPattern.intLiteral(start);
         }
         if (match(Token.TokenKind.STRING)) {
-            return new AstMatchPattern(AstMatchPattern.Kind.STRING, previous().lexeme());
+            return AstMatchPattern.stringLiteral(previous().lexeme());
         }
         throw error(peek(), "Unsupported match pattern");
     }

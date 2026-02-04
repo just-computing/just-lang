@@ -8,6 +8,7 @@ import java.util.Map;
 public final class TypeEnvironment {
     private final Map<String, Binding> locals = new HashMap<>();
     private final List<String> errors = new ArrayList<>();
+    private final List<String> warnings = new ArrayList<>();
 
     public void define(String name, TypeId type, boolean mutable) {
         locals.put(name, new Binding(type, mutable));
@@ -27,8 +28,16 @@ public final class TypeEnvironment {
         errors.add(message);
     }
 
+    public void addWarning(String message) {
+        warnings.add(message);
+    }
+
     public List<String> errors() {
         return errors;
+    }
+
+    public List<String> warnings() {
+        return warnings;
     }
 
     public record Binding(TypeId type, boolean mutable) {}

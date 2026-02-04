@@ -1,11 +1,13 @@
 package org.justlang.compiler;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 
 public final class TypeChecker {
     private TypeId currentReturnType = TypeId.VOID;
-    private int loopDepth = 0;
+    private final Deque<LoopContext> loopStack = new ArrayDeque<>();
 
     public TypedModule typeCheck(HirModule module) {
         throw new UnsupportedOperationException("Type checker not implemented yet");
@@ -208,11 +210,11 @@ public final class TypeChecker {
                     diags.addError("while condition must be bool");
                     success = false;
                 }
-                loopDepth++;
+                loopStack.push(new LoopContext(whileStmt.label(), false));
                 if (!checkBlock(whileStmt.body(), locals.fork(), structs, functions, expectedReturn, diags)) {
                     success = false;
                 }
-                loopDepth--;
+                loopStack.pop();
                 continue;
             }
             if (stmt instanceof AstForStmt forStmt) {
@@ -224,23 +226,29 @@ public final class TypeChecker {
                 }
                 TypeEnvironment loopLocals = locals.fork();
                 loopLocals.define(forStmt.name(), TypeId.INT, false);
-                loopDepth++;
+                loopStack.push(new LoopContext(forStmt.label(), false));
                 if (!checkBlock(forStmt.body(), loopLocals, structs, functions, expectedReturn, diags)) {
                     success = false;
                 }
-                loopDepth--;
+                loopStack.pop();
                 continue;
             }
-            if (stmt instanceof AstBreakStmt) {
-                if (loopDepth == 0) {
-                    diags.addError("break is only valid inside loops");
+            if (stmt instanceof AstLoopStmt loopStmt) {
+                loopStack.push(new LoopContext(loopStmt.label(), false));
+                if (!checkBlock(loopStmt.body(), locals.fork(), structs, functions, expectedReturn, diags)) {
+                    success = false;
+                }
+                loopStack.pop();
+                continue;
+            }
+            if (stmt instanceof AstBreakStmt breakStmt) {
+                if (!checkBreak(breakStmt, locals, structs, functions, diags)) {
                     success = false;
                 }
                 continue;
             }
-            if (stmt instanceof AstContinueStmt) {
-                if (loopDepth == 0) {
-                    diags.addError("continue is only valid inside loops");
+            if (stmt instanceof AstContinueStmt continueStmt) {
+                if (!checkContinue(continueStmt, diags)) {
                     success = false;
                 }
                 continue;
@@ -401,6 +409,20 @@ public final class TypeChecker {
             }
             return valueType;
         }
+        if (expr instanceof AstLoopExpr loopExpr) {
+            LoopContext context = new LoopContext(null, true);
+            loopStack.push(context);
+            if (!checkBlock(loopExpr.body(), locals.fork(), structs, functions, currentReturnType, diags)) {
+                loopStack.pop();
+                return TypeId.UNKNOWN;
+            }
+            loopStack.pop();
+            if (context.breakType == null) {
+                diags.addError("loop expression requires break with value");
+                return TypeId.UNKNOWN;
+            }
+            return context.breakType;
+        }
         if (expr instanceof AstMatchExpr matchExpr) {
             if (matchExpr.arms().isEmpty()) {
                 diags.addError("match requires at least one arm");
@@ -416,13 +438,29 @@ public final class TypeChecker {
             }
             boolean hasWildcard = false;
             TypeId armType = null;
-            for (AstMatchArm arm : matchExpr.arms()) {
+            List<AstMatchArm> arms = matchExpr.arms();
+            for (int i = 0; i < arms.size(); i++) {
+                AstMatchArm arm = arms.get(i);
                 AstMatchPattern pattern = arm.pattern();
                 if (pattern.kind() == AstMatchPattern.Kind.WILDCARD) {
                     hasWildcard = true;
-                } else if (!patternMatchesType(pattern, targetType)) {
-                    diags.addError("match pattern does not match target type");
-                    return TypeId.UNKNOWN;
+                    if (i != arms.size() - 1) {
+                        diags.addError("wildcard '_' must be the last match arm");
+                        return TypeId.UNKNOWN;
+                    }
+                } else {
+                    if (!patternMatchesType(pattern, targetType)) {
+                        diags.addError("match pattern does not match target type");
+                        return TypeId.UNKNOWN;
+                    }
+                    if (pattern.kind() == AstMatchPattern.Kind.RANGE) {
+                        int start = Integer.parseInt(pattern.rangeStart());
+                        int end = Integer.parseInt(pattern.rangeEnd());
+                        if (start > end) {
+                            diags.addError("match range start must be <= end");
+                            return TypeId.UNKNOWN;
+                        }
+                    }
                 }
                 TypeId valueType = inferExpr(arm.expr(), locals, structs, functions, diags);
                 if (valueType == TypeId.UNKNOWN) {
@@ -440,8 +478,7 @@ public final class TypeChecker {
                 }
             }
             if (!hasWildcard) {
-                diags.addError("match expression requires a '_' wildcard arm");
-                return TypeId.UNKNOWN;
+                diags.addWarning("match expression is non-exhaustive (missing '_')");
             }
             return armType == null ? TypeId.UNKNOWN : armType;
         }
@@ -588,12 +625,77 @@ public final class TypeChecker {
             && "print".equals(callExpr.callee().get(1));
     }
 
+    private boolean checkBreak(AstBreakStmt breakStmt, TypeEnvironment locals, StructRegistry structs, FunctionRegistry functions, TypeEnvironment diags) {
+        LoopContext context = resolveLoopContext(breakStmt.label(), diags, "break");
+        if (context == null) {
+            return false;
+        }
+        if (breakStmt.expr() != null) {
+            if (!context.allowsValue) {
+                diags.addError("break with value is only allowed in loop expressions");
+                return false;
+            }
+            TypeId valueType = inferExpr(breakStmt.expr(), locals, structs, functions, diags);
+            if (valueType == TypeId.UNKNOWN || valueType == TypeId.VOID) {
+                diags.addError("break value must be a non-void expression");
+                return false;
+            }
+            if (context.breakType == null) {
+                context.breakType = valueType;
+            } else if (!context.breakType.equals(valueType)) {
+                diags.addError("break values in loop expression must have the same type");
+                return false;
+            }
+            return true;
+        }
+
+        if (context.allowsValue) {
+            diags.addError("break value required for loop expression");
+            return false;
+        }
+        return true;
+    }
+
+    private boolean checkContinue(AstContinueStmt continueStmt, TypeEnvironment diags) {
+        LoopContext context = resolveLoopContext(continueStmt.label(), diags, "continue");
+        return context != null;
+    }
+
+    private LoopContext resolveLoopContext(String label, TypeEnvironment diags, String keyword) {
+        if (loopStack.isEmpty()) {
+            diags.addError(keyword + " is only valid inside loops");
+            return null;
+        }
+        if (label == null) {
+            return loopStack.peek();
+        }
+        for (LoopContext context : loopStack) {
+            if (label.equals(context.label)) {
+                return context;
+            }
+        }
+        diags.addError("Unknown loop label '" + label + "'");
+        return null;
+    }
+
     private boolean patternMatchesType(AstMatchPattern pattern, TypeId targetType) {
         return switch (pattern.kind()) {
             case WILDCARD -> true;
             case INT -> targetType == TypeId.INT;
             case BOOL -> targetType == TypeId.BOOL;
             case STRING -> targetType == TypeId.STRING;
+            case RANGE -> targetType == TypeId.INT;
         };
+    }
+
+    private static final class LoopContext {
+        private final String label;
+        private final boolean allowsValue;
+        private TypeId breakType;
+
+        private LoopContext(String label, boolean allowsValue) {
+            this.label = label;
+            this.allowsValue = allowsValue;
+        }
     }
 }
