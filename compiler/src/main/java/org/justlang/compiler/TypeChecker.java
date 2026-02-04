@@ -5,7 +5,7 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 
-public final class TypeChecker {
+public final class TypeChecker implements TypeCheckerStrategy {
     private TypeId currentReturnType = TypeId.VOID;
     private final Deque<LoopContext> loopStack = new ArrayDeque<>();
 
@@ -13,6 +13,7 @@ public final class TypeChecker {
         throw new UnsupportedOperationException("Type checker not implemented yet");
     }
 
+    @Override
     public TypeResult typeCheck(AstModule module) {
         TypeEnvironment diags = new TypeEnvironment();
         StructRegistry structs = new StructRegistry();

@@ -14,7 +14,7 @@ import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
-public final class Codegen {
+public final class Codegen implements CodegenStrategy {
     private static final String MAIN_CLASS_NAME = "Main";
     private static final String MAIN_INTERNAL_NAME = "Main";
     private final Map<String, StructLayout> structLayouts = new HashMap<>();
@@ -22,6 +22,7 @@ public final class Codegen {
     private final Deque<LoopContext> loopStack = new ArrayDeque<>();
     private ReturnInfo currentReturnInfo;
 
+    @Override
     public List<ClassFile> emit(AstModule module) {
         buildStructLayouts(module);
         buildFunctionRegistry(module);
@@ -33,6 +34,7 @@ public final class Codegen {
         return classFiles;
     }
 
+    @Override
     public String mainClassName() {
         return MAIN_CLASS_NAME;
     }

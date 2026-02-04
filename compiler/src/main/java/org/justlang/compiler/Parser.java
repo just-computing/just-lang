@@ -3,12 +3,17 @@ package org.justlang.compiler;
 import java.util.ArrayList;
 import java.util.List;
 
-public final class Parser {
+public final class Parser implements ParserStrategy {
     private List<Token> tokens;
     private int current;
     private boolean allowStructInit = true;
+    private Diagnostics diagnostics;
+    private SourceFile sourceFile;
 
-    public AstModule parse(List<Token> tokens) {
+    @Override
+    public AstModule parse(SourceFile sourceFile, List<Token> tokens, Diagnostics diagnostics) {
+        this.sourceFile = sourceFile;
+        this.diagnostics = diagnostics;
         this.tokens = tokens;
         this.current = 0;
         List<AstItem> items = new ArrayList<>();
@@ -702,6 +707,10 @@ public final class Parser {
     }
 
     private ParseException error(Token token, String message) {
-        return new ParseException(message + " at " + token.line() + ":" + token.column());
+        String full = message + " at " + token.line() + ":" + token.column();
+        if (diagnostics != null && sourceFile != null) {
+            diagnostics.report(new Diagnostic(full, sourceFile.path()));
+        }
+        return new ParseException(full);
     }
 }

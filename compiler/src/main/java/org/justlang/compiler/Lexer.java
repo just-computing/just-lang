@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
-public final class Lexer {
+public final class Lexer implements LexerStrategy {
     private static final Set<String> KEYWORDS = Set.of(
         "fn",
         "let",
@@ -24,7 +24,8 @@ public final class Lexer {
         "continue"
     );
 
-    public List<Token> lex(SourceFile sourceFile) {
+    @Override
+    public List<Token> lex(SourceFile sourceFile, Diagnostics diagnostics) {
         String source = sourceFile.contents();
         List<Token> tokens = new ArrayList<>();
         int index = 0;
@@ -159,7 +160,9 @@ public final class Lexer {
                 continue;
             }
 
-            throw new IllegalArgumentException("Unexpected character '" + c + "' at " + line + ":" + column);
+            String message = "Unexpected character '" + c + "' at " + line + ":" + column;
+            diagnostics.report(new Diagnostic(message, sourceFile.path()));
+            throw new LexException(message);
         }
 
         tokens.add(new Token(Token.TokenKind.EOF, "", line, column));
