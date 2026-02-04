@@ -47,7 +47,7 @@ Parses Just source, performs name/type/borrow analysis, lowers to IR, monomorphi
 - `while`, `for i in 0..N` / `0..=N`, and `loop {}` (infinite loop).
 - `break`, `break <expr>` (loop expressions only), `continue`, and optional loop labels (`'outer:`).
 - `if let` / `while let` statements for pattern matching.
-- `match` expression with literal patterns (`int`, `bool`, `String`), range patterns (`1..=5`), enum patterns (`Enum::Variant(x)`), and `_` wildcard.
+- `match` expression with literal patterns (`int`, `bool`, `String`), range patterns (`1..=5`), enum patterns (`Enum::Variant(x)`), `_` wildcard, and arm guards (`pattern if condition => ...`).
 - User-defined enums with unit or single-payload variants.
 - Built-in `Option` and `Result` enums (lowered to enums with `Some/None` and `Ok/Err` variants; payload uses `Any` in v1).
 - Assignments (`=`) and compound assignments (`+=`, `-=`, `*=`, `/=`) for `i32`.

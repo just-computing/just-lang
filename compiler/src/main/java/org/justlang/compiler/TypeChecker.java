@@ -562,7 +562,8 @@ public final class TypeChecker implements TypeCheckerStrategy {
             for (int i = 0; i < arms.size(); i++) {
                 AstMatchArm arm = arms.get(i);
                 AstMatchPattern pattern = arm.pattern();
-                if (pattern.kind() == AstMatchPattern.Kind.WILDCARD) {
+                boolean hasGuard = arm.guard() != null;
+                if (pattern.kind() == AstMatchPattern.Kind.WILDCARD && !hasGuard) {
                     hasWildcard = true;
                     if (i != arms.size() - 1) {
                         diagnostics.addError("wildcard '_' must be the last match arm");
@@ -581,13 +582,20 @@ public final class TypeChecker implements TypeCheckerStrategy {
                             return TypeId.UNKNOWN;
                         }
                     }
-                    if (AstMatchPattern.Kind.ENUM.equals(pattern.kind()) && coveredVariants != null) {
+                    if (AstMatchPattern.Kind.ENUM.equals(pattern.kind()) && coveredVariants != null && !hasGuard) {
                         coveredVariants.add(pattern.variantName());
                     }
                 }
                 TypeEnvironment armLocals = locals.fork();
                 if (AstMatchPattern.Kind.ENUM.equals(pattern.kind())) {
                     if (!bindEnumPattern(pattern, targetType, armLocals, structs, enums, diagnostics)) {
+                        return TypeId.UNKNOWN;
+                    }
+                }
+                if (arm.guard() != null) {
+                    TypeId guardType = inferExpr(arm.guard(), armLocals, structs, enums, functions, diagnostics);
+                    if (guardType != TypeId.BOOL) {
+                        diagnostics.addError("match guard must be bool");
                         return TypeId.UNKNOWN;
                     }
                 }

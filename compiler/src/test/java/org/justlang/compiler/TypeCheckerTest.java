@@ -931,6 +931,42 @@ public class TypeCheckerTest {
     }
 
     @Test
+    void matchGuardMustBeBool() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let x = match 1 {
+                    1 if 10 => 1,
+                    _ => 0,
+                };
+                std::print(x);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("match guard must be bool")));
+    }
+
+    @Test
+    void guardedEnumArmsDoNotCountAsExhaustive() {
+        TypeResult result = typeCheck("""
+            enum Choice { A, B }
+            fn main() {
+                let value = Choice::A;
+                let x = match value {
+                    Choice::A if true => 1,
+                    Choice::B => 2,
+                };
+                std::print(x);
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+        assertTrue(result.environment().warnings().stream().anyMatch(err -> err.contains("missing Choice::A")));
+    }
+
+    @Test
     void reservedEnumNameFails() {
         TypeResult result = typeCheck("""
             enum Option { X }

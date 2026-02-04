@@ -729,6 +729,10 @@ public final class Parser implements ParserStrategy {
         List<AstMatchArm> arms = new ArrayList<>();
         while (!checkSymbol("}") && !isAtEnd()) {
             AstMatchPattern pattern = parseMatchPattern();
+            AstExpr guard = null;
+            if (matchKeyword("if")) {
+                guard = parseExpr();
+            }
             expectSymbol("=>");
             AstExpr value;
             if (checkSymbol("{")) {
@@ -736,7 +740,7 @@ public final class Parser implements ParserStrategy {
             } else {
                 value = parseExpr();
             }
-            arms.add(new AstMatchArm(pattern, value));
+            arms.add(new AstMatchArm(pattern, guard, value));
             if (matchSymbol(",")) {
                 continue;
             }

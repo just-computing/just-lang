@@ -721,54 +721,41 @@ public final class Codegen implements CodegenStrategy {
         storeLocal(mv, target.kind(), targetSlot);
 
         Label endLabel = new Label();
+        Label noMatchLabel = new Label();
         ExprValue resultType = null;
-        Label defaultLabel = null;
         boolean hasWildcard = false;
+        List<AstMatchArm> arms = matchExpr.arms();
+        List<Label> checkLabels = new ArrayList<>();
+        for (int i = 0; i <= arms.size(); i++) {
+            checkLabels.add(new Label());
+        }
 
-        List<ArmCode> arms = new ArrayList<>();
-        for (AstMatchArm arm : matchExpr.arms()) {
-            Label label = new Label();
-            arms.add(new ArmCode(arm, label));
+        mv.visitLabel(checkLabels.get(0));
+        for (int i = 0; i < arms.size(); i++) {
+            AstMatchArm arm = arms.get(i);
             AstMatchPattern pattern = arm.pattern();
-            if (pattern.kind() == AstMatchPattern.Kind.WILDCARD) {
-                defaultLabel = label;
+            Label nextCheck = checkLabels.get(i + 1);
+
+            if (pattern.kind() != AstMatchPattern.Kind.WILDCARD) {
+                Label patternMatch = new Label();
+                emitMatchCompare(mv, target, targetSlot, pattern, patternMatch);
+                mv.visitJumpInsn(Opcodes.GOTO, nextCheck);
+                mv.visitLabel(patternMatch);
+            } else if (arm.guard() == null) {
                 hasWildcard = true;
-                continue;
             }
-            emitMatchCompare(mv, target, targetSlot, pattern, label);
-        }
 
-        if (defaultLabel == null) {
-            defaultLabel = new Label();
-        }
-
-        mv.visitJumpInsn(Opcodes.GOTO, defaultLabel);
-
-        for (ArmCode arm : arms) {
-            mv.visitLabel(arm.label());
             LocalState armLocals = locals.fork();
-            AstMatchPattern pattern = arm.arm().pattern();
-            if (pattern.kind() == AstMatchPattern.Kind.ENUM) {
-                EnumLayout layout = enumLayouts.get(pattern.enumName());
-                if (layout == null) {
-                    throw new IllegalStateException("Unknown enum: " + pattern.enumName());
+            bindPattern(mv, pattern, targetSlot, armLocals);
+            if (arm.guard() != null) {
+                ExprValue guard = emitExpr(mv, arm.guard(), armLocals);
+                if (guard.kind() != ValueKind.BOOL) {
+                    throw new IllegalStateException("match guard must be bool");
                 }
-                EnumVariant variant = layout.variant(pattern.variantName());
-                if (variant == null) {
-                    throw new IllegalStateException("Unknown variant: " + pattern.variantName());
-                }
-                if (pattern.binding() != null) {
-                    if (variant.payloadType() == null) {
-                        throw new IllegalStateException("Variant '" + variant.name() + "' does not bind a value");
-                    }
-                    int bindingSlot = armLocals.allocate(pattern.binding(), toValueKind(variant.payloadType()), variant.payloadType().isStruct() ? variant.payloadType().structName() : variant.payloadType().isEnum() ? variant.payloadType().enumName() : null);
-                    loadLocal(mv, ValueKind.ENUM, targetSlot);
-                    mv.visitFieldInsn(Opcodes.GETFIELD, layout.internalName(), "payload", "Ljava/lang/Object;");
-                    emitUnboxPayload(mv, variant.payloadType());
-                    storeLocal(mv, toValueKind(variant.payloadType()), bindingSlot);
-                }
+                mv.visitJumpInsn(Opcodes.IFEQ, nextCheck);
             }
-            ExprValue value = emitExpr(mv, arm.arm().expr(), armLocals);
+
+            ExprValue value = emitExpr(mv, arm.expr(), armLocals);
             if (value.kind() == ValueKind.VOID) {
                 throw new IllegalStateException("match arm cannot be void");
             }
@@ -778,15 +765,20 @@ public final class Codegen implements CodegenStrategy {
                 throw new IllegalStateException("match arms must return the same type");
             }
             mv.visitJumpInsn(Opcodes.GOTO, endLabel);
+            mv.visitLabel(nextCheck);
         }
 
+        mv.visitJumpInsn(Opcodes.GOTO, noMatchLabel);
+
         if (!hasWildcard) {
-            mv.visitLabel(defaultLabel);
+            mv.visitLabel(noMatchLabel);
             mv.visitTypeInsn(Opcodes.NEW, "java/lang/IllegalStateException");
             mv.visitInsn(Opcodes.DUP);
             mv.visitLdcInsn("Non-exhaustive match");
             mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/IllegalStateException", "<init>", "(Ljava/lang/String;)V", false);
             mv.visitInsn(Opcodes.ATHROW);
+        } else {
+            mv.visitLabel(noMatchLabel);
         }
 
         mv.visitLabel(endLabel);
