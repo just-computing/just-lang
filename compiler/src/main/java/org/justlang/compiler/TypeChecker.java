@@ -58,11 +58,13 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     if (paramType == TypeId.UNKNOWN) {
                         diagnostics.addError("Unknown parameter type: " + param.type());
                         success = false;
+                        paramTypes.add(TypeId.UNKNOWN);
                         continue;
                     }
                     if (paramType == TypeId.VOID) {
                         diagnostics.addError("Parameter type cannot be void");
                         success = false;
+                        paramTypes.add(TypeId.UNKNOWN);
                         continue;
                     }
                     paramTypes.add(paramType);
