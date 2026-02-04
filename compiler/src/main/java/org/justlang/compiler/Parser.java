@@ -30,6 +30,9 @@ public final class Parser implements ParserStrategy {
         if (matchKeyword("struct")) {
             return parseStruct();
         }
+        if (matchKeyword("enum")) {
+            return parseEnum();
+        }
         throw error(peek(), "Expected item (e.g., 'fn' or 'struct')");
     }
 
@@ -39,10 +42,11 @@ public final class Parser implements ParserStrategy {
         List<AstParam> params = new ArrayList<>();
         if (!checkSymbol(")")) {
             do {
+                boolean mutable = matchKeyword("mut");
                 Token paramName = expect(Token.TokenKind.IDENT, "Expected parameter name");
                 expectSymbol(":");
                 String paramType = parseTypeName();
-                params.add(new AstParam(paramName.lexeme(), paramType));
+                params.add(new AstParam(paramName.lexeme(), paramType, mutable));
             } while (matchSymbol(","));
         }
         expectSymbol(")");
@@ -62,6 +66,9 @@ public final class Parser implements ParserStrategy {
                 return parseFor(label);
             }
             if (matchKeyword("while")) {
+                if (matchKeyword("let")) {
+                    return parseWhileLet(label);
+                }
                 return parseWhile(label);
             }
             if (matchKeyword("loop")) {
@@ -70,6 +77,9 @@ public final class Parser implements ParserStrategy {
             throw error(peek(), "Labels can only be applied to loops");
         }
         if (matchKeyword("if")) {
+            if (matchKeyword("let")) {
+                return parseIfLet();
+            }
             return parseIf();
         }
         if (matchKeyword("for")) {
@@ -79,6 +89,9 @@ public final class Parser implements ParserStrategy {
             return parseLoopStmt(null);
         }
         if (matchKeyword("while")) {
+            if (matchKeyword("let")) {
+                return parseWhileLet(null);
+            }
             return parseWhile(null);
         }
         if (matchKeyword("break")) {
@@ -104,12 +117,17 @@ public final class Parser implements ParserStrategy {
     private AstStmt parseLet() {
         boolean mutable = matchKeyword("mut");
         Token name = expect(Token.TokenKind.IDENT, "Expected identifier after 'let'");
-        AstExpr initializer = null;
-        if (matchSymbol("=")) {
-            initializer = parseExpr();
+        String type = null;
+        if (matchSymbol(":")) {
+            type = parseTypeName();
         }
+        AstExpr initializer = null;
+        if (!matchSymbol("=")) {
+            throw error(peek(), "Expected '=' after let binding");
+        }
+        initializer = parseExpr();
         expectSymbol(";");
-        return new AstLetStmt(name.lexeme(), mutable, initializer);
+        return new AstLetStmt(name.lexeme(), mutable, type, initializer);
     }
 
     private AstExpr parseExpr() {
@@ -306,7 +324,10 @@ public final class Parser implements ParserStrategy {
     }
 
     private AstStmt parseIf() {
+        boolean previous = allowStructInit;
+        allowStructInit = false;
         AstExpr condition = parseExpr();
+        allowStructInit = previous;
         List<AstStmt> thenBranch = parseBlock();
         List<AstStmt> elseBranch = null;
         if (matchKeyword("else")) {
@@ -322,9 +343,23 @@ public final class Parser implements ParserStrategy {
     }
 
     private AstStmt parseWhile(String label) {
+        boolean previous = allowStructInit;
+        allowStructInit = false;
         AstExpr condition = parseExpr();
+        allowStructInit = previous;
         List<AstStmt> body = parseBlock();
         return new AstWhileStmt(label, condition, body);
+    }
+
+    private AstStmt parseWhileLet(String label) {
+        AstMatchPattern pattern = parseMatchPattern();
+        expectSymbol("=");
+        boolean previous = allowStructInit;
+        allowStructInit = false;
+        AstExpr target = parseExpr();
+        allowStructInit = previous;
+        List<AstStmt> body = parseBlock();
+        return new AstWhileLetStmt(label, pattern, target, body);
     }
 
     private AstStmt parseFor(String label) {
@@ -346,7 +381,10 @@ public final class Parser implements ParserStrategy {
     }
 
     private AstExpr parseIfExpr() {
+        boolean previous = allowStructInit;
+        allowStructInit = false;
         AstExpr condition = parseExpr();
+        allowStructInit = previous;
         AstExpr thenExpr = parseBlockExpr();
         if (!matchKeyword("else")) {
             throw error(peek(), "if expression requires else");
@@ -358,6 +396,31 @@ public final class Parser implements ParserStrategy {
             elseExpr = parseBlockExpr();
         }
         return new AstIfExpr(condition, thenExpr, elseExpr);
+    }
+
+    private AstStmt parseIfLet() {
+        AstMatchPattern pattern = parseMatchPattern();
+        expectSymbol("=");
+        boolean previous = allowStructInit;
+        allowStructInit = false;
+        AstExpr target = parseExpr();
+        allowStructInit = previous;
+        List<AstStmt> thenBranch = parseBlock();
+        List<AstStmt> elseBranch = null;
+        if (matchKeyword("else")) {
+            if (matchKeyword("if")) {
+                if (matchKeyword("let")) {
+                    elseBranch = new ArrayList<>();
+                    elseBranch.add(parseIfLet());
+                } else {
+                    elseBranch = new ArrayList<>();
+                    elseBranch.add(parseIf());
+                }
+            } else {
+                elseBranch = parseBlock();
+            }
+        }
+        return new AstIfLetStmt(pattern, target, thenBranch, elseBranch);
     }
 
     private AstExpr parseBlockExpr() {
@@ -395,7 +458,11 @@ public final class Parser implements ParserStrategy {
                 continue;
             }
             if (matchKeyword("while")) {
-                statements.add(parseWhile(null));
+                if (matchKeyword("let")) {
+                    statements.add(parseWhileLet(null));
+                } else {
+                    statements.add(parseWhile(null));
+                }
                 continue;
             }
             if (matchKeyword("break")) {
@@ -415,7 +482,13 @@ public final class Parser implements ParserStrategy {
                 continue;
             }
             if (matchKeyword("if")) {
-                AstExpr ifExpr = parseIfExpr();
+                AstExpr ifExpr;
+                if (matchKeyword("let")) {
+                    AstStmt ifLet = parseIfLet();
+                    statements.add(ifLet);
+                    continue;
+                }
+                ifExpr = parseIfExpr();
                 if (matchSymbol(";")) {
                     statements.add(new AstExprStmt(ifExpr));
                     continue;
@@ -518,6 +591,26 @@ public final class Parser implements ParserStrategy {
         }
         expectSymbol("}");
         return new AstStruct(name.lexeme(), fields);
+    }
+
+    private AstEnum parseEnum() {
+        Token name = expect(Token.TokenKind.IDENT, "Expected enum name");
+        expectSymbol("{");
+        List<AstEnumVariant> variants = new ArrayList<>();
+        while (!checkSymbol("}") && !isAtEnd()) {
+            Token variantName = expect(Token.TokenKind.IDENT, "Expected variant name");
+            String payloadType = null;
+            if (matchSymbol("(")) {
+                payloadType = parseTypeName();
+                expectSymbol(")");
+            }
+            variants.add(new AstEnumVariant(variantName.lexeme(), payloadType));
+            if (!matchSymbol(",")) {
+                break;
+            }
+        }
+        expectSymbol("}");
+        return new AstEnum(name.lexeme(), variants);
     }
 
     private List<String> parsePath() {
@@ -657,11 +750,22 @@ public final class Parser implements ParserStrategy {
 
     private AstMatchPattern parseMatchPattern() {
         if (check(Token.TokenKind.IDENT)) {
-            Token ident = advance();
-            if ("_".equals(ident.lexeme())) {
+            List<String> path = parsePath();
+            if (path.size() == 1 && "_".equals(path.get(0))) {
                 return AstMatchPattern.wildcard();
             }
-            throw error(ident, "Only '_' wildcard identifier is supported in match patterns");
+            if (path.size() == 2) {
+                String enumName = path.get(0);
+                String variantName = path.get(1);
+                String binding = null;
+                if (matchSymbol("(")) {
+                    Token bind = expect(Token.TokenKind.IDENT, "Expected binding name");
+                    binding = bind.lexeme();
+                    expectSymbol(")");
+                }
+                return AstMatchPattern.enumVariant(enumName, variantName, binding);
+            }
+            throw error(peek(), "Unsupported match pattern");
         }
         if (matchKeyword("true")) {
             return AstMatchPattern.boolLiteral("true");

@@ -27,4 +27,4 @@ Defines the core language types and collections used by Just programs, implement
 
 - `core` (Option/Result/traits), `alloc` (Box/Vec/String), and `collections` (Map) are built on the same off-heap allocator.
 - GC objects are only used for boundary conversions (e.g., `StringRef`), not stored in off-heap structures.
-
+- In the current compiler prototype, `Option` and `Result` are lowered to built-in enums with `Any` payloads to avoid generics.

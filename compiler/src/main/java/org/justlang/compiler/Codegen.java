@@ -18,17 +18,22 @@ public final class Codegen implements CodegenStrategy {
     private static final String MAIN_CLASS_NAME = "Main";
     private static final String MAIN_INTERNAL_NAME = "Main";
     private final Map<String, StructLayout> structLayouts = new HashMap<>();
+    private final Map<String, EnumLayout> enumLayouts = new HashMap<>();
     private final Map<String, FunctionInfo> functions = new HashMap<>();
     private final Deque<LoopContext> loopStack = new ArrayDeque<>();
     private ReturnInfo currentReturnInfo;
 
     @Override
     public List<ClassFile> emit(AstModule module) {
+        buildEnumLayouts(module);
         buildStructLayouts(module);
         buildFunctionRegistry(module);
         List<ClassFile> classFiles = new ArrayList<>();
         for (StructLayout layout : structLayouts.values()) {
             classFiles.add(emitStructClass(layout));
+        }
+        for (EnumLayout layout : enumLayouts.values()) {
+            classFiles.add(emitEnumClass(layout));
         }
         classFiles.add(emitMainClass(module));
         return classFiles;
@@ -67,6 +72,21 @@ public final class Codegen implements CodegenStrategy {
 
         emitStructConstructor(writer, layout);
         emitStructToString(writer, layout);
+        writer.visitEnd();
+        return new ClassFile(layout.internalName(), writer.toByteArray());
+    }
+
+    private ClassFile emitEnumClass(EnumLayout layout) {
+        ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        writer.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL, layout.internalName(), null, "java/lang/Object", null);
+
+        writer.visitField(Opcodes.ACC_FINAL, "tag", "I", null, null).visitEnd();
+        writer.visitField(Opcodes.ACC_FINAL, "payload", "Ljava/lang/Object;", null, null).visitEnd();
+
+        emitEnumConstructor(writer, layout);
+        emitEnumFactories(writer, layout);
+        emitEnumToString(writer, layout);
+
         writer.visitEnd();
         return new ClassFile(layout.internalName(), writer.toByteArray());
     }
@@ -131,6 +151,121 @@ public final class Codegen implements CodegenStrategy {
         mv.visitInsn(Opcodes.ARETURN);
         mv.visitMaxs(0, 0);
         mv.visitEnd();
+    }
+
+    private void emitEnumConstructor(ClassWriter writer, EnumLayout layout) {
+        MethodVisitor mv = writer.visitMethod(Opcodes.ACC_PRIVATE, "<init>", "(ILjava/lang/Object;)V", null, null);
+        mv.visitCode();
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitVarInsn(Opcodes.ILOAD, 1);
+        mv.visitFieldInsn(Opcodes.PUTFIELD, layout.internalName(), "tag", "I");
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitVarInsn(Opcodes.ALOAD, 2);
+        mv.visitFieldInsn(Opcodes.PUTFIELD, layout.internalName(), "payload", "Ljava/lang/Object;");
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+    }
+
+    private void emitEnumFactories(ClassWriter writer, EnumLayout layout) {
+        for (EnumVariant variant : layout.variants()) {
+            String desc = variant.payloadType() == null
+                ? "()" + "L" + layout.internalName() + ";"
+                : "(" + descriptorFor(variant.payloadType()) + ")" + "L" + layout.internalName() + ";";
+            MethodVisitor mv = writer.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, variant.name(), desc, null, null);
+            mv.visitCode();
+            mv.visitTypeInsn(Opcodes.NEW, layout.internalName());
+            mv.visitInsn(Opcodes.DUP);
+            mv.visitLdcInsn(variant.tag());
+            if (variant.payloadType() == null) {
+                mv.visitInsn(Opcodes.ACONST_NULL);
+            } else {
+                loadLocal(mv, toValueKind(variant.payloadType()), 0);
+                loadAndBoxPayload(mv, variant.payloadType());
+            }
+            mv.visitMethodInsn(Opcodes.INVOKESPECIAL, layout.internalName(), "<init>", "(ILjava/lang/Object;)V", false);
+            mv.visitInsn(Opcodes.ARETURN);
+            mv.visitMaxs(0, 0);
+            mv.visitEnd();
+        }
+    }
+
+    private void emitEnumToString(ClassWriter writer, EnumLayout layout) {
+        MethodVisitor mv = writer.visitMethod(Opcodes.ACC_PUBLIC, "toString", "()Ljava/lang/String;", null, null);
+        mv.visitCode();
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitFieldInsn(Opcodes.GETFIELD, layout.internalName(), "tag", "I");
+
+        Label defaultLabel = new Label();
+        Label endLabel = new Label();
+        Label[] labels = new Label[layout.variants().size()];
+        int[] keys = new int[layout.variants().size()];
+        for (int i = 0; i < layout.variants().size(); i++) {
+            labels[i] = new Label();
+            keys[i] = layout.variants().get(i).tag();
+        }
+        mv.visitLookupSwitchInsn(defaultLabel, keys, labels);
+
+        for (int i = 0; i < layout.variants().size(); i++) {
+            EnumVariant variant = layout.variants().get(i);
+            mv.visitLabel(labels[i]);
+            mv.visitLdcInsn(layout.name() + "::" + variant.name());
+            mv.visitJumpInsn(Opcodes.GOTO, endLabel);
+        }
+        mv.visitLabel(defaultLabel);
+        mv.visitLdcInsn(layout.name() + "::?");
+        mv.visitLabel(endLabel);
+        mv.visitInsn(Opcodes.ARETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+    }
+
+    private void loadAndBoxPayload(MethodVisitor mv, TypeId payloadType) {
+        if (payloadType == TypeId.INT) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false);
+            return;
+        }
+        if (payloadType == TypeId.BOOL) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false);
+            return;
+        }
+        // String, struct, enum are already Objects on stack
+    }
+
+    private void boxIfNeeded(MethodVisitor mv, ValueKind kind) {
+        if (kind == ValueKind.INT) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false);
+            return;
+        }
+        if (kind == ValueKind.BOOL) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false);
+        }
+    }
+
+    private void emitUnboxPayload(MethodVisitor mv, TypeId payloadType) {
+        if (payloadType == TypeId.INT) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Integer");
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Integer", "intValue", "()I", false);
+            return;
+        }
+        if (payloadType == TypeId.BOOL) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/Boolean");
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false);
+            return;
+        }
+        if (payloadType == TypeId.STRING) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/String");
+            return;
+        }
+        if (payloadType.isStruct()) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, payloadType.structName());
+            return;
+        }
+        if (payloadType.isEnum()) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, payloadType.enumName());
+        }
     }
 
     private void emitFunctions(ClassWriter writer, AstModule module) {
@@ -209,6 +344,10 @@ public final class Codegen implements CodegenStrategy {
             emitIf(mv, ifStmt, locals, returnInfo);
             return;
         }
+        if (stmt instanceof AstIfLetStmt ifLetStmt) {
+            emitIfLet(mv, ifLetStmt, locals, returnInfo);
+            return;
+        }
         if (stmt instanceof AstForStmt forStmt) {
             emitFor(mv, forStmt, locals, returnInfo);
             return;
@@ -219,6 +358,10 @@ public final class Codegen implements CodegenStrategy {
         }
         if (stmt instanceof AstWhileStmt whileStmt) {
             emitWhile(mv, whileStmt, locals, returnInfo);
+            return;
+        }
+        if (stmt instanceof AstWhileLetStmt whileLetStmt) {
+            emitWhileLet(mv, whileLetStmt, locals, returnInfo);
             return;
         }
         if (stmt instanceof AstAssignStmt assignStmt) {
@@ -270,7 +413,7 @@ public final class Codegen implements CodegenStrategy {
             if (value.kind() == ValueKind.VOID) {
                 throw new IllegalStateException("Cannot assign void expression to " + assignStmt.name());
             }
-            if (value.kind() != local.kind() || (value.kind() == ValueKind.STRUCT && !value.structName().equals(local.structName()))) {
+            if (value.kind() != local.kind() || ((value.kind() == ValueKind.STRUCT || value.kind() == ValueKind.ENUM) && !value.structName().equals(local.structName()))) {
                 throw new IllegalStateException("Type mismatch in assignment to " + assignStmt.name());
             }
             storeLocal(mv, local.kind(), local.slot());
@@ -309,6 +452,62 @@ public final class Codegen implements CodegenStrategy {
         if (ifStmt.elseBranch() != null) {
             emitBlock(mv, ifStmt.elseBranch(), locals.fork(), returnInfo);
         }
+        mv.visitLabel(endLabel);
+    }
+
+    private void emitIfLet(MethodVisitor mv, AstIfLetStmt ifLetStmt, LocalState locals, ReturnInfo returnInfo) {
+        ExprValue target = emitExpr(mv, ifLetStmt.target(), locals);
+        int targetSlot = locals.allocateTemp();
+        storeLocal(mv, target.kind(), targetSlot);
+
+        Label thenLabel = new Label();
+        Label elseLabel = new Label();
+        Label endLabel = new Label();
+
+        if (ifLetStmt.pattern().kind() == AstMatchPattern.Kind.WILDCARD) {
+            mv.visitJumpInsn(Opcodes.GOTO, thenLabel);
+        } else {
+            emitMatchCompare(mv, target, targetSlot, ifLetStmt.pattern(), thenLabel);
+            mv.visitJumpInsn(Opcodes.GOTO, elseLabel);
+        }
+
+        mv.visitLabel(thenLabel);
+        LocalState thenLocals = locals.fork();
+        bindPattern(mv, ifLetStmt.pattern(), targetSlot, thenLocals);
+        emitBlock(mv, ifLetStmt.thenBranch(), thenLocals, returnInfo);
+        mv.visitJumpInsn(Opcodes.GOTO, endLabel);
+
+        mv.visitLabel(elseLabel);
+        if (ifLetStmt.elseBranch() != null) {
+            emitBlock(mv, ifLetStmt.elseBranch(), locals.fork(), returnInfo);
+        }
+        mv.visitLabel(endLabel);
+    }
+
+    private void emitWhileLet(MethodVisitor mv, AstWhileLetStmt whileLetStmt, LocalState locals, ReturnInfo returnInfo) {
+        Label startLabel = new Label();
+        Label continueLabel = new Label();
+        Label endLabel = new Label();
+
+        mv.visitLabel(startLabel);
+        ExprValue target = emitExpr(mv, whileLetStmt.target(), locals);
+        int targetSlot = locals.allocateTemp();
+        storeLocal(mv, target.kind(), targetSlot);
+
+        if (whileLetStmt.pattern().kind() == AstMatchPattern.Kind.WILDCARD) {
+            // always match
+        } else {
+            emitMatchCompare(mv, target, targetSlot, whileLetStmt.pattern(), continueLabel);
+            mv.visitJumpInsn(Opcodes.GOTO, endLabel);
+        }
+
+        mv.visitLabel(continueLabel);
+        LocalState bodyLocals = locals.fork();
+        bindPattern(mv, whileLetStmt.pattern(), targetSlot, bodyLocals);
+        loopStack.push(new LoopContext(whileLetStmt.label(), startLabel, endLabel, false, -1));
+        emitBlock(mv, whileLetStmt.body(), bodyLocals, returnInfo);
+        loopStack.pop();
+        mv.visitJumpInsn(Opcodes.GOTO, startLabel);
         mv.visitLabel(endLabel);
     }
 
@@ -471,7 +670,7 @@ public final class Codegen implements CodegenStrategy {
         }
         mv.visitInsn(switch (returnInfo.kind()) {
             case INT, BOOL -> Opcodes.IRETURN;
-            case STRING, STRUCT -> Opcodes.ARETURN;
+            case STRING, STRUCT, ENUM, ANY -> Opcodes.ARETURN;
             case VOID -> Opcodes.RETURN;
         });
     }
@@ -515,8 +714,8 @@ public final class Codegen implements CodegenStrategy {
 
     private ExprValue emitMatchExpr(MethodVisitor mv, AstMatchExpr matchExpr, LocalState locals) {
         ExprValue target = emitExpr(mv, matchExpr.target(), locals);
-        if (target.kind() != ValueKind.INT && target.kind() != ValueKind.BOOL && target.kind() != ValueKind.STRING) {
-            throw new IllegalStateException("match target must be int, bool, or String");
+        if (target.kind() != ValueKind.INT && target.kind() != ValueKind.BOOL && target.kind() != ValueKind.STRING && target.kind() != ValueKind.ENUM) {
+            throw new IllegalStateException("match target must be int, bool, String, or enum");
         }
         int targetSlot = locals.allocateTemp();
         storeLocal(mv, target.kind(), targetSlot);
@@ -547,7 +746,29 @@ public final class Codegen implements CodegenStrategy {
 
         for (ArmCode arm : arms) {
             mv.visitLabel(arm.label());
-            ExprValue value = emitExpr(mv, arm.arm().expr(), locals);
+            LocalState armLocals = locals.fork();
+            AstMatchPattern pattern = arm.arm().pattern();
+            if (pattern.kind() == AstMatchPattern.Kind.ENUM) {
+                EnumLayout layout = enumLayouts.get(pattern.enumName());
+                if (layout == null) {
+                    throw new IllegalStateException("Unknown enum: " + pattern.enumName());
+                }
+                EnumVariant variant = layout.variant(pattern.variantName());
+                if (variant == null) {
+                    throw new IllegalStateException("Unknown variant: " + pattern.variantName());
+                }
+                if (pattern.binding() != null) {
+                    if (variant.payloadType() == null) {
+                        throw new IllegalStateException("Variant '" + variant.name() + "' does not bind a value");
+                    }
+                    int bindingSlot = armLocals.allocate(pattern.binding(), toValueKind(variant.payloadType()), variant.payloadType().isStruct() ? variant.payloadType().structName() : variant.payloadType().isEnum() ? variant.payloadType().enumName() : null);
+                    loadLocal(mv, ValueKind.ENUM, targetSlot);
+                    mv.visitFieldInsn(Opcodes.GETFIELD, layout.internalName(), "payload", "Ljava/lang/Object;");
+                    emitUnboxPayload(mv, variant.payloadType());
+                    storeLocal(mv, toValueKind(variant.payloadType()), bindingSlot);
+                }
+            }
+            ExprValue value = emitExpr(mv, arm.arm().expr(), armLocals);
             if (value.kind() == ValueKind.VOID) {
                 throw new IllegalStateException("match arm cannot be void");
             }
@@ -619,10 +840,55 @@ public final class Codegen implements CodegenStrategy {
                 mv.visitJumpInsn(jumpOp, matchLabel);
                 mv.visitLabel(fail);
             }
+            case ENUM -> {
+                if (target.kind() != ValueKind.ENUM) {
+                    throw new IllegalStateException("match enum pattern used on non-enum target");
+                }
+                EnumLayout layout = enumLayouts.get(pattern.enumName());
+                if (layout == null) {
+                    throw new IllegalStateException("Unknown enum: " + pattern.enumName());
+                }
+                EnumVariant variant = layout.variant(pattern.variantName());
+                if (variant == null) {
+                    throw new IllegalStateException("Unknown variant: " + pattern.variantName());
+                }
+                loadLocal(mv, ValueKind.ENUM, targetSlot);
+                mv.visitFieldInsn(Opcodes.GETFIELD, layout.internalName(), "tag", "I");
+                mv.visitLdcInsn(variant.tag());
+                mv.visitJumpInsn(Opcodes.IF_ICMPEQ, matchLabel);
+            }
             case WILDCARD -> {
                 // handled elsewhere
             }
         }
+    }
+
+    private void bindPattern(MethodVisitor mv, AstMatchPattern pattern, int targetSlot, LocalState locals) {
+        if (pattern.kind() != AstMatchPattern.Kind.ENUM) {
+            return;
+        }
+        if (pattern.binding() == null) {
+            return;
+        }
+        EnumLayout layout = enumLayouts.get(pattern.enumName());
+        if (layout == null) {
+            throw new IllegalStateException("Unknown enum: " + pattern.enumName());
+        }
+        EnumVariant variant = layout.variant(pattern.variantName());
+        if (variant == null) {
+            throw new IllegalStateException("Unknown variant: " + pattern.variantName());
+        }
+        if (variant.payloadType() == null) {
+            throw new IllegalStateException("Variant '" + variant.name() + "' does not bind a value");
+        }
+        String typeName = variant.payloadType().isStruct()
+            ? variant.payloadType().structName()
+            : variant.payloadType().isEnum() ? variant.payloadType().enumName() : null;
+        int slot = locals.allocate(pattern.binding(), toValueKind(variant.payloadType()), typeName);
+        loadLocal(mv, ValueKind.ENUM, targetSlot);
+        mv.visitFieldInsn(Opcodes.GETFIELD, layout.internalName(), "payload", "Ljava/lang/Object;");
+        emitUnboxPayload(mv, variant.payloadType());
+        storeLocal(mv, toValueKind(variant.payloadType()), slot);
     }
 
     private ExprValue emitExpr(MethodVisitor mv, AstExpr expr, LocalState locals) {
@@ -674,11 +940,17 @@ public final class Codegen implements CodegenStrategy {
         if (expr instanceof AstLoopExpr loopExpr) {
             return emitLoopExpr(mv, loopExpr, locals);
         }
+        if (expr instanceof AstPathExpr pathExpr) {
+            return emitEnumPath(mv, pathExpr, locals);
+        }
         throw new IllegalStateException("Unsupported expression: " + expr.getClass().getSimpleName());
     }
 
     private ExprValue emitCall(MethodVisitor mv, AstCallExpr call, LocalState locals) {
         if (!isPrintCall(call)) {
+            if (call.callee().size() == 2) {
+                return emitEnumCall(mv, call, locals);
+            }
             if (call.callee().size() != 1) {
                 throw new IllegalStateException("Only direct function calls are supported");
             }
@@ -711,12 +983,72 @@ public final class Codegen implements CodegenStrategy {
             mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(I)V", false);
         } else if (arg.kind() == ValueKind.BOOL) {
             mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Z)V", false);
-        } else if (arg.kind() == ValueKind.STRUCT) {
+        } else if (arg.kind() == ValueKind.STRUCT || arg.kind() == ValueKind.ENUM || arg.kind() == ValueKind.ANY) {
             mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/Object;)V", false);
         } else {
             throw new IllegalStateException("Unsupported print argument type: " + arg.kind());
         }
         return ExprValue.of(ValueKind.VOID);
+    }
+
+    private ExprValue emitEnumPath(MethodVisitor mv, AstPathExpr pathExpr, LocalState locals) {
+        List<String> segments = pathExpr.segments();
+        if (segments.size() != 2) {
+            throw new IllegalStateException("Unsupported path expression: " + String.join("::", segments));
+        }
+        String enumName = segments.get(0);
+        String variantName = segments.get(1);
+        EnumLayout layout = enumLayouts.get(enumName);
+        if (layout == null) {
+            throw new IllegalStateException("Unknown enum: " + enumName);
+        }
+        EnumVariant variant = layout.variant(variantName);
+        if (variant == null) {
+            throw new IllegalStateException("Unknown variant: " + variantName);
+        }
+        if (variant.payloadType() != null) {
+            throw new IllegalStateException("Variant '" + variantName + "' requires a value");
+        }
+        mv.visitMethodInsn(Opcodes.INVOKESTATIC, layout.internalName(), variantName, "()" + "L" + layout.internalName() + ";", false);
+        return new ExprValue(ValueKind.ENUM, layout.name());
+    }
+
+    private ExprValue emitEnumCall(MethodVisitor mv, AstCallExpr call, LocalState locals) {
+        String enumName = call.callee().get(0);
+        String variantName = call.callee().get(1);
+        EnumLayout layout = enumLayouts.get(enumName);
+        if (layout == null) {
+            throw new IllegalStateException("Unknown enum: " + enumName);
+        }
+        EnumVariant variant = layout.variant(variantName);
+        if (variant == null) {
+            throw new IllegalStateException("Unknown variant: " + variantName);
+        }
+        if (variant.payloadType() == null) {
+            if (!call.args().isEmpty()) {
+                throw new IllegalStateException("Variant '" + variantName + "' does not take a value");
+            }
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, layout.internalName(), variantName, "()" + "L" + layout.internalName() + ";", false);
+            return new ExprValue(ValueKind.ENUM, layout.name());
+        }
+        if (call.args().size() != 1) {
+            throw new IllegalStateException("Variant '" + variantName + "' expects one argument");
+        }
+        ExprValue arg = emitExpr(mv, call.args().get(0), locals);
+        if (!arg.matches(new ReturnInfo(toValueKind(variant.payloadType()), variant.payloadType().isStruct() ? variant.payloadType().structName() : variant.payloadType().enumName()))) {
+            throw new IllegalStateException("Variant '" + variantName + "' argument type mismatch");
+        }
+        if (variant.payloadType() == TypeId.ANY) {
+            boxIfNeeded(mv, arg.kind());
+        }
+        mv.visitMethodInsn(
+            Opcodes.INVOKESTATIC,
+            layout.internalName(),
+            variantName,
+            "(" + descriptorFor(variant.payloadType()) + ")" + "L" + layout.internalName() + ";",
+            false
+        );
+        return new ExprValue(ValueKind.ENUM, layout.name());
     }
 
     private ExprValue emitStructInit(MethodVisitor mv, AstStructInitExpr initExpr, LocalState locals) {
@@ -859,8 +1191,16 @@ public final class Codegen implements CodegenStrategy {
             }
             return ExprValue.of(ValueKind.BOOL);
         }
+        if (left.kind() == ValueKind.ANY) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z", false);
+            if (negate) {
+                mv.visitInsn(Opcodes.ICONST_1);
+                mv.visitInsn(Opcodes.IXOR);
+            }
+            return ExprValue.of(ValueKind.BOOL);
+        }
         int opcode;
-        if (left.kind() == ValueKind.STRUCT) {
+        if (left.kind() == ValueKind.STRUCT || left.kind() == ValueKind.ENUM) {
             opcode = negate ? Opcodes.IF_ACMPNE : Opcodes.IF_ACMPEQ;
         } else {
             opcode = negate ? Opcodes.IF_ICMPNE : Opcodes.IF_ICMPEQ;
@@ -896,7 +1236,7 @@ public final class Codegen implements CodegenStrategy {
             mv.visitVarInsn(Opcodes.ISTORE, slot);
             return;
         }
-        if (kind == ValueKind.STRING || kind == ValueKind.STRUCT) {
+        if (kind == ValueKind.STRING || kind == ValueKind.STRUCT || kind == ValueKind.ENUM || kind == ValueKind.ANY) {
             mv.visitVarInsn(Opcodes.ASTORE, slot);
             return;
         }
@@ -908,7 +1248,7 @@ public final class Codegen implements CodegenStrategy {
             mv.visitVarInsn(Opcodes.ILOAD, slot);
             return;
         }
-        if (kind == ValueKind.STRING || kind == ValueKind.STRUCT) {
+        if (kind == ValueKind.STRING || kind == ValueKind.STRUCT || kind == ValueKind.ENUM || kind == ValueKind.ANY) {
             mv.visitVarInsn(Opcodes.ALOAD, slot);
             return;
         }
@@ -949,18 +1289,83 @@ public final class Codegen implements CodegenStrategy {
         }
     }
 
-    private void buildStructLayouts(AstModule module) {
+    private void buildEnumLayouts(AstModule module) {
         Set<String> structNames = new HashSet<>();
+        Set<String> enumNames = new HashSet<>();
+        for (AstEnum builtin : builtinEnums()) {
+            enumNames.add(builtin.name());
+        }
         for (AstItem item : module.items()) {
             if (item instanceof AstStruct struct) {
                 structNames.add(struct.name());
             }
+            if (item instanceof AstEnum enumDef) {
+                if (enumNames.contains(enumDef.name())) {
+                    throw new IllegalStateException("Enum name is reserved or already defined: " + enumDef.name());
+                }
+                enumNames.add(enumDef.name());
+            }
+        }
+        for (AstEnum builtin : builtinEnums()) {
+            addEnumLayout(builtin, structNames, enumNames);
+        }
+        for (AstItem item : module.items()) {
+            if (item instanceof AstEnum enumDef) {
+                addEnumLayout(enumDef, structNames, enumNames);
+            }
+        }
+    }
+
+    private void buildStructLayouts(AstModule module) {
+        Set<String> structNames = new HashSet<>();
+        Set<String> enumNames = new HashSet<>();
+        for (AstEnum builtin : builtinEnums()) {
+            enumNames.add(builtin.name());
         }
         for (AstItem item : module.items()) {
             if (item instanceof AstStruct struct) {
-                structLayouts.put(struct.name(), StructLayout.from(struct, structNames));
+                structNames.add(struct.name());
+            }
+            if (item instanceof AstEnum enumDef) {
+                enumNames.add(enumDef.name());
             }
         }
+        for (AstItem item : module.items()) {
+            if (item instanceof AstStruct struct) {
+                structLayouts.put(struct.name(), StructLayout.from(struct, structNames, enumNames));
+            }
+        }
+    }
+
+    private void addEnumLayout(AstEnum enumDef, Set<String> structNames, Set<String> enumNames) {
+        List<EnumVariant> variants = new ArrayList<>();
+        int tag = 0;
+        for (AstEnumVariant variant : enumDef.variants()) {
+            TypeId payloadType = null;
+            if (variant.payloadType() != null) {
+                payloadType = resolveTypeName(variant.payloadType(), structNames, enumNames);
+                if (payloadType == TypeId.UNKNOWN || payloadType == TypeId.VOID) {
+                    throw new IllegalStateException("Unsupported payload type: " + variant.payloadType());
+                }
+            }
+            variants.add(new EnumVariant(variant.name(), tag++, payloadType));
+        }
+        enumLayouts.put(enumDef.name(), new EnumLayout(enumDef.name(), enumDef.name(), variants));
+    }
+
+    private List<AstEnum> builtinEnums() {
+        List<AstEnumVariant> optionVariants = List.of(
+            new AstEnumVariant("Some", "Any"),
+            new AstEnumVariant("None", null)
+        );
+        List<AstEnumVariant> resultVariants = List.of(
+            new AstEnumVariant("Ok", "Any"),
+            new AstEnumVariant("Err", "Any")
+        );
+        return List.of(
+            new AstEnum("Option", optionVariants),
+            new AstEnum("Result", resultVariants)
+        );
     }
 
     private TypeId resolveReturnType(String name) {
@@ -982,6 +1387,23 @@ public final class Codegen implements CodegenStrategy {
         if (structLayouts.containsKey(name)) {
             return TypeId.struct(name);
         }
+        if (enumLayouts.containsKey(name)) {
+            return TypeId.enumType(name);
+        }
+        return TypeId.UNKNOWN;
+    }
+
+    private TypeId resolveTypeName(String name, Set<String> knownStructs, Set<String> knownEnums) {
+        TypeId base = TypeId.fromTypeName(name);
+        if (base != TypeId.UNKNOWN) {
+            return base;
+        }
+        if (knownStructs.contains(name)) {
+            return TypeId.struct(name);
+        }
+        if (knownEnums.contains(name)) {
+            return TypeId.enumType(name);
+        }
         return TypeId.UNKNOWN;
     }
 
@@ -998,14 +1420,14 @@ public final class Codegen implements CodegenStrategy {
                 throw new IllegalStateException("Parameter type cannot be void");
             }
             ValueKind paramKind = toValueKind(paramType);
-            String paramStruct = paramType.isStruct() ? paramType.structName() : null;
+            String paramStruct = paramType.isStruct() ? paramType.structName() : paramType.isEnum() ? paramType.enumName() : null;
             String paramDesc = descriptorFor(paramType);
             params.add(new ParamInfo(param.name(), paramKind, paramStruct, paramDesc));
             descriptor.append(paramDesc);
         }
         descriptor.append(')').append(descriptorFor(returnType));
         ValueKind kind = toValueKind(returnType);
-        String structName = returnType.isStruct() ? returnType.structName() : null;
+        String structName = returnType.isStruct() ? returnType.structName() : returnType.isEnum() ? returnType.enumName() : null;
         return new FunctionInfo(fn.name(), kind, structName, descriptor.toString(), params);
     }
 
@@ -1019,11 +1441,17 @@ public final class Codegen implements CodegenStrategy {
         if (type == TypeId.STRING) {
             return ValueKind.STRING;
         }
+        if (type == TypeId.ANY) {
+            return ValueKind.ANY;
+        }
         if (type == TypeId.VOID) {
             return ValueKind.VOID;
         }
         if (type.isStruct()) {
             return ValueKind.STRUCT;
+        }
+        if (type.isEnum()) {
+            return ValueKind.ENUM;
         }
         throw new IllegalStateException("Unsupported type: " + type);
     }
@@ -1038,11 +1466,17 @@ public final class Codegen implements CodegenStrategy {
         if (type == TypeId.STRING) {
             return "Ljava/lang/String;";
         }
+        if (type == TypeId.ANY) {
+            return "Ljava/lang/Object;";
+        }
         if (type == TypeId.VOID) {
             return "V";
         }
         if (type.isStruct()) {
             return "L" + type.structName() + ";";
+        }
+        if (type.isEnum()) {
+            return "L" + type.enumName() + ";";
         }
         throw new IllegalStateException("Unsupported type: " + type);
     }
@@ -1051,6 +1485,8 @@ public final class Codegen implements CodegenStrategy {
         STRING,
         INT,
         BOOL,
+        ANY,
+        ENUM,
         STRUCT,
         VOID
     }
@@ -1071,10 +1507,13 @@ public final class Codegen implements CodegenStrategy {
         }
 
         boolean matches(ReturnInfo returnInfo) {
+            if (returnInfo.kind() == ValueKind.ANY) {
+                return kind != ValueKind.VOID;
+            }
             if (kind != returnInfo.kind()) {
                 return false;
             }
-            if (kind == ValueKind.STRUCT) {
+            if (kind == ValueKind.STRUCT || kind == ValueKind.ENUM) {
                 return structName != null && structName.equals(returnInfo.structName());
             }
             return true;
@@ -1142,10 +1581,10 @@ public final class Codegen implements CodegenStrategy {
     }
 
     private record StructLayout(String name, String internalName, List<FieldInfo> fields) {
-        static StructLayout from(AstStruct struct, Set<String> knownStructs) {
+        static StructLayout from(AstStruct struct, Set<String> knownStructs, Set<String> knownEnums) {
             List<FieldInfo> fieldInfos = new ArrayList<>();
             for (AstField field : struct.fields()) {
-                fieldInfos.add(FieldInfo.from(field, knownStructs));
+                fieldInfos.add(FieldInfo.from(field, knownStructs, knownEnums));
             }
             return new StructLayout(struct.name(), struct.name(), fieldInfos);
         }
@@ -1173,23 +1612,40 @@ public final class Codegen implements CodegenStrategy {
             if (field.kind() != kind) {
                 return false;
             }
-            if (kind == ValueKind.STRUCT) {
+            if (kind == ValueKind.STRUCT || kind == ValueKind.ENUM) {
                 return field.structName().equals(structName);
             }
             return true;
         }
     }
 
+    private record EnumLayout(String name, String internalName, List<EnumVariant> variants) {
+        EnumVariant variant(String name) {
+            for (EnumVariant variant : variants) {
+                if (variant.name().equals(name)) {
+                    return variant;
+                }
+            }
+            return null;
+        }
+    }
+
+    private record EnumVariant(String name, int tag, TypeId payloadType) {}
+
     private record FieldInfo(String name, String descriptor, ValueKind kind, String structName) {
-        static FieldInfo from(AstField field, Set<String> knownStructs) {
+        static FieldInfo from(AstField field, Set<String> knownStructs, Set<String> knownEnums) {
             String type = field.type();
             return switch (type) {
                 case "String", "std::String" -> new FieldInfo(field.name(), "Ljava/lang/String;", ValueKind.STRING, null);
                 case "i32", "int" -> new FieldInfo(field.name(), "I", ValueKind.INT, null);
                 case "bool" -> new FieldInfo(field.name(), "Z", ValueKind.BOOL, null);
+                case "Any", "std::Any" -> new FieldInfo(field.name(), "Ljava/lang/Object;", ValueKind.ANY, null);
                 default -> {
                     if (knownStructs.contains(type)) {
                         yield new FieldInfo(field.name(), "L" + type + ";", ValueKind.STRUCT, type);
+                    }
+                    if (knownEnums.contains(type)) {
+                        yield new FieldInfo(field.name(), "L" + type + ";", ValueKind.ENUM, type);
                     }
                     throw new IllegalStateException("Unsupported field type: " + type);
                 }

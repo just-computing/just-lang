@@ -1,22 +1,27 @@
 package org.justlang.compiler;
 
 public final class TypeId {
+    private final Kind kind;
     private final String name;
-    private final boolean struct;
 
-    public static final TypeId STRING = new TypeId("String", false);
-    public static final TypeId INT = new TypeId("Int", false);
-    public static final TypeId BOOL = new TypeId("Bool", false);
-    public static final TypeId VOID = new TypeId("Void", false);
-    public static final TypeId UNKNOWN = new TypeId("Unknown", false);
+    public static final TypeId STRING = new TypeId(Kind.STRING, null);
+    public static final TypeId INT = new TypeId(Kind.INT, null);
+    public static final TypeId BOOL = new TypeId(Kind.BOOL, null);
+    public static final TypeId ANY = new TypeId(Kind.ANY, null);
+    public static final TypeId VOID = new TypeId(Kind.VOID, null);
+    public static final TypeId UNKNOWN = new TypeId(Kind.UNKNOWN, null);
 
-    private TypeId(String name, boolean struct) {
+    private TypeId(Kind kind, String name) {
+        this.kind = kind;
         this.name = name;
-        this.struct = struct;
     }
 
     public static TypeId struct(String name) {
-        return new TypeId(name, true);
+        return new TypeId(Kind.STRUCT, name);
+    }
+
+    public static TypeId enumType(String name) {
+        return new TypeId(Kind.ENUM, name);
     }
 
     public static TypeId fromTypeName(String name) {
@@ -24,26 +29,43 @@ public final class TypeId {
             case "String", "std::String" -> STRING;
             case "i32", "int" -> INT;
             case "bool" -> BOOL;
+            case "Any", "std::Any" -> ANY;
             case "void" -> VOID;
             default -> UNKNOWN;
         };
     }
 
     public boolean isPrintable() {
-        return this == STRING || this == INT || this == BOOL || struct;
+        return this == STRING || this == INT || this == BOOL || this == ANY || kind == Kind.STRUCT || kind == Kind.ENUM;
     }
 
     public boolean isStruct() {
-        return struct;
+        return kind == Kind.STRUCT;
+    }
+
+    public boolean isEnum() {
+        return kind == Kind.ENUM;
     }
 
     public String structName() {
-        return struct ? name : null;
+        return kind == Kind.STRUCT ? name : null;
+    }
+
+    public String enumName() {
+        return kind == Kind.ENUM ? name : null;
     }
 
     @Override
     public String toString() {
-        return name;
+        return switch (kind) {
+            case STRING -> "String";
+            case INT -> "Int";
+            case BOOL -> "Bool";
+            case ANY -> "Any";
+            case VOID -> "Void";
+            case STRUCT, ENUM -> name;
+            case UNKNOWN -> "Unknown";
+        };
     }
 
     @Override
@@ -54,11 +76,22 @@ public final class TypeId {
         if (!(other instanceof TypeId that)) {
             return false;
         }
-        return this.struct == that.struct && this.name.equals(that.name);
+        return this.kind == that.kind && java.util.Objects.equals(this.name, that.name);
     }
 
     @Override
     public int hashCode() {
-        return name.hashCode() * 31 + (struct ? 1 : 0);
+        return java.util.Objects.hash(kind, name);
+    }
+
+    private enum Kind {
+        STRING,
+        INT,
+        BOOL,
+        ANY,
+        VOID,
+        STRUCT,
+        ENUM,
+        UNKNOWN
     }
 }

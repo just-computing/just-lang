@@ -46,5 +46,38 @@ Parses Just source, performs name/type/borrow analysis, lowers to IR, monomorphi
 - `if` / `else if` / `else` statements and `if` expressions.
 - `while`, `for i in 0..N` / `0..=N`, and `loop {}` (infinite loop).
 - `break`, `break <expr>` (loop expressions only), `continue`, and optional loop labels (`'outer:`).
-- `match` expression with literal patterns (`int`, `bool`, `String`), range patterns (`1..=5`), and `_` wildcard.
+- `if let` / `while let` statements for pattern matching.
+- `match` expression with literal patterns (`int`, `bool`, `String`), range patterns (`1..=5`), enum patterns (`Enum::Variant(x)`), and `_` wildcard.
+- User-defined enums with unit or single-payload variants.
+- Built-in `Option` and `Result` enums (lowered to enums with `Some/None` and `Ok/Err` variants; payload uses `Any` in v1).
 - Assignments (`=`) and compound assignments (`+=`, `-=`, `*=`, `/=`) for `i32`.
+
+Example control flow:
+```just
+fn main() {
+    let x = 3;
+    if x == 0 {
+        std::print("zero");
+    } else if x < 3 {
+        std::print("small");
+    } else {
+        std::print("big");
+    }
+    return;
+}
+```
+
+Example `if let` / `while let`:
+```just
+fn main() {
+    let mut value = Option::Some(3);
+    if let Option::Some(x) = value {
+        std::print(x);
+    }
+    while let Option::Some(x) = value {
+        std::print(x);
+        value = Option::None;
+    }
+    return;
+}
+```

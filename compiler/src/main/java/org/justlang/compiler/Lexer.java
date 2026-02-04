@@ -10,6 +10,7 @@ public final class Lexer implements LexerStrategy {
         "let",
         "mut",
         "return",
+        "enum",
         "struct",
         "true",
         "false",

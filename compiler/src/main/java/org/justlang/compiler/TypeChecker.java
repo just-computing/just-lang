@@ -17,12 +17,23 @@ public final class TypeChecker implements TypeCheckerStrategy {
     public TypeResult typeCheck(AstModule module) {
         TypeEnvironment diags = new TypeEnvironment();
         StructRegistry structs = new StructRegistry();
+        EnumRegistry enums = new EnumRegistry();
         FunctionRegistry functions = new FunctionRegistry();
         boolean success = true;
+
+        registerBuiltinEnums(enums);
 
         for (AstItem item : module.items()) {
             if (item instanceof AstStruct struct) {
                 structs.register(struct);
+            }
+            if (item instanceof AstEnum enumDef) {
+                if (enums.contains(enumDef.name())) {
+                    diags.addError("Enum name is reserved or already defined: " + enumDef.name());
+                    success = false;
+                    continue;
+                }
+                enums.register(enumDef);
             }
         }
 
@@ -41,7 +52,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
 
                 List<TypeId> paramTypes = new ArrayList<>();
                 for (AstParam param : fn.params()) {
-                    TypeId paramType = resolveTypeName(param.type(), structs);
+                    TypeId paramType = resolveTypeName(param.type(), structs, enums);
                     if (paramType == TypeId.UNKNOWN) {
                         diags.addError("Unknown parameter type: " + param.type());
                         success = false;
@@ -55,7 +66,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     paramTypes.add(paramType);
                 }
 
-                TypeId returnType = resolveReturnType(fn.returnType(), structs, diags);
+                TypeId returnType = resolveReturnType(fn.returnType(), structs, enums, diags);
                 if (returnType == TypeId.UNKNOWN) {
                     success = false;
                 }
@@ -70,12 +81,12 @@ public final class TypeChecker implements TypeCheckerStrategy {
 
         for (AstItem item : module.items()) {
             if (item instanceof AstFunction fn) {
-                if (!checkFunction(fn, structs, functions, diags)) {
+                if (!checkFunction(fn, structs, enums, functions, diags)) {
                     success = false;
                 }
                 continue;
             }
-            if (!(item instanceof AstStruct)) {
+            if (!(item instanceof AstStruct) && !(item instanceof AstEnum)) {
                 diags.addError("Unsupported item: " + item.getClass().getSimpleName());
                 success = false;
             }
@@ -84,9 +95,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
         return new TypeResult(success, diags);
     }
 
-    private boolean checkFunction(AstFunction fn, StructRegistry structs, FunctionRegistry functions, TypeEnvironment diags) {
+    private boolean checkFunction(AstFunction fn, StructRegistry structs, EnumRegistry enums, FunctionRegistry functions, TypeEnvironment diags) {
         boolean success = true;
-        TypeId expectedReturn = resolveReturnType(fn.returnType(), structs, diags);
+        TypeId expectedReturn = resolveReturnType(fn.returnType(), structs, enums, diags);
         if (expectedReturn == TypeId.UNKNOWN) {
             return false;
         }
@@ -101,12 +112,12 @@ public final class TypeChecker implements TypeCheckerStrategy {
         List<TypeId> paramTypes = sig.paramTypes();
         for (int i = 0; i < fn.params().size(); i++) {
             TypeId paramType = paramTypes.get(i);
-            locals.define(fn.params().get(i).name(), paramType, false);
+            locals.define(fn.params().get(i).name(), paramType, fn.params().get(i).mutable());
         }
 
         TypeId previousReturn = currentReturnType;
         currentReturnType = expectedReturn;
-        if (!checkBlock(fn.body(), locals, structs, functions, expectedReturn, diags)) {
+        if (!checkBlock(fn.body(), locals, structs, enums, functions, expectedReturn, diags)) {
             success = false;
         }
         currentReturnType = previousReturn;
@@ -123,6 +134,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
         List<AstStmt> statements,
         TypeEnvironment locals,
         StructRegistry structs,
+        EnumRegistry enums,
         FunctionRegistry functions,
         TypeId expectedReturn,
         TypeEnvironment diags
@@ -135,7 +147,21 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     success = false;
                     continue;
                 }
-                TypeId exprType = inferExpr(letStmt.initializer(), locals, structs, functions, diags);
+                TypeId declaredType = null;
+                if (letStmt.type() != null) {
+                    declaredType = resolveTypeName(letStmt.type(), structs, enums);
+                    if (declaredType == TypeId.UNKNOWN) {
+                        diags.addError("Unknown type: " + letStmt.type());
+                        success = false;
+                        continue;
+                    }
+                    if (declaredType == TypeId.VOID) {
+                        diags.addError("let type cannot be void");
+                        success = false;
+                        continue;
+                    }
+                }
+                TypeId exprType = inferExpr(letStmt.initializer(), locals, structs, enums, functions, diags);
                 if (exprType == TypeId.UNKNOWN || exprType == TypeId.VOID) {
                     if (exprType == TypeId.VOID) {
                         diags.addError("let initializer cannot be void");
@@ -143,7 +169,12 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     success = false;
                     continue;
                 }
-                locals.define(letStmt.name(), exprType, letStmt.mutable());
+                if (declaredType != null && !isAssignable(declaredType, exprType)) {
+                    diags.addError("Type mismatch in let binding '" + letStmt.name() + "': expected " + declaredType + " got " + exprType);
+                    success = false;
+                    continue;
+                }
+                locals.define(letStmt.name(), declaredType != null ? declaredType : exprType, letStmt.mutable());
                 continue;
             }
             if (stmt instanceof AstAssignStmt assignStmt) {
@@ -158,7 +189,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     success = false;
                     continue;
                 }
-                TypeId valueType = inferExpr(assignStmt.value(), locals, structs, functions, diags);
+                TypeId valueType = inferExpr(assignStmt.value(), locals, structs, enums, functions, diags);
                 if (valueType == TypeId.UNKNOWN) {
                     success = false;
                     continue;
@@ -170,7 +201,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 }
                 String op = assignStmt.operator();
                 if ("=".equals(op)) {
-                    if (!binding.type().equals(valueType)) {
+                    if (!isAssignable(binding.type(), valueType)) {
                         diags.addError("Type mismatch in assignment to " + assignStmt.name());
                         success = false;
                     }
@@ -183,44 +214,56 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 continue;
             }
             if (stmt instanceof AstExprStmt exprStmt) {
-                TypeId exprType = inferExpr(exprStmt.expr(), locals, structs, functions, diags);
+                TypeId exprType = inferExpr(exprStmt.expr(), locals, structs, enums, functions, diags);
                 if (exprType == TypeId.UNKNOWN) {
                     success = false;
                 }
                 continue;
             }
             if (stmt instanceof AstIfStmt ifStmt) {
-                TypeId condType = inferExpr(ifStmt.condition(), locals, structs, functions, diags);
+                TypeId condType = inferExpr(ifStmt.condition(), locals, structs, enums, functions, diags);
                 if (condType != TypeId.BOOL) {
                     diags.addError("if condition must be bool");
                     success = false;
                 }
-                if (!checkBlock(ifStmt.thenBranch(), locals.fork(), structs, functions, expectedReturn, diags)) {
+                if (!checkBlock(ifStmt.thenBranch(), locals.fork(), structs, enums, functions, expectedReturn, diags)) {
                     success = false;
                 }
                 if (ifStmt.elseBranch() != null) {
-                    if (!checkBlock(ifStmt.elseBranch(), locals.fork(), structs, functions, expectedReturn, diags)) {
+                    if (!checkBlock(ifStmt.elseBranch(), locals.fork(), structs, enums, functions, expectedReturn, diags)) {
                         success = false;
                     }
                 }
                 continue;
             }
+            if (stmt instanceof AstIfLetStmt ifLetStmt) {
+                if (!checkIfLet(ifLetStmt, locals, structs, enums, functions, expectedReturn, diags)) {
+                    success = false;
+                }
+                continue;
+            }
             if (stmt instanceof AstWhileStmt whileStmt) {
-                TypeId condType = inferExpr(whileStmt.condition(), locals, structs, functions, diags);
+                TypeId condType = inferExpr(whileStmt.condition(), locals, structs, enums, functions, diags);
                 if (condType != TypeId.BOOL) {
                     diags.addError("while condition must be bool");
                     success = false;
                 }
                 loopStack.push(new LoopContext(whileStmt.label(), false));
-                if (!checkBlock(whileStmt.body(), locals.fork(), structs, functions, expectedReturn, diags)) {
+                if (!checkBlock(whileStmt.body(), locals.fork(), structs, enums, functions, expectedReturn, diags)) {
                     success = false;
                 }
                 loopStack.pop();
                 continue;
             }
+            if (stmt instanceof AstWhileLetStmt whileLetStmt) {
+                if (!checkWhileLet(whileLetStmt, locals, structs, enums, functions, expectedReturn, diags)) {
+                    success = false;
+                }
+                continue;
+            }
             if (stmt instanceof AstForStmt forStmt) {
-                TypeId startType = inferExpr(forStmt.start(), locals, structs, functions, diags);
-                TypeId endType = inferExpr(forStmt.end(), locals, structs, functions, diags);
+                TypeId startType = inferExpr(forStmt.start(), locals, structs, enums, functions, diags);
+                TypeId endType = inferExpr(forStmt.end(), locals, structs, enums, functions, diags);
                 if (startType != TypeId.INT || endType != TypeId.INT) {
                     diags.addError("for loop bounds must be int");
                     success = false;
@@ -228,7 +271,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 TypeEnvironment loopLocals = locals.fork();
                 loopLocals.define(forStmt.name(), TypeId.INT, false);
                 loopStack.push(new LoopContext(forStmt.label(), false));
-                if (!checkBlock(forStmt.body(), loopLocals, structs, functions, expectedReturn, diags)) {
+                if (!checkBlock(forStmt.body(), loopLocals, structs, enums, functions, expectedReturn, diags)) {
                     success = false;
                 }
                 loopStack.pop();
@@ -236,14 +279,14 @@ public final class TypeChecker implements TypeCheckerStrategy {
             }
             if (stmt instanceof AstLoopStmt loopStmt) {
                 loopStack.push(new LoopContext(loopStmt.label(), false));
-                if (!checkBlock(loopStmt.body(), locals.fork(), structs, functions, expectedReturn, diags)) {
+                if (!checkBlock(loopStmt.body(), locals.fork(), structs, enums, functions, expectedReturn, diags)) {
                     success = false;
                 }
                 loopStack.pop();
                 continue;
             }
             if (stmt instanceof AstBreakStmt breakStmt) {
-                if (!checkBreak(breakStmt, locals, structs, functions, diags)) {
+                if (!checkBreak(breakStmt, locals, structs, enums, functions, diags)) {
                     success = false;
                 }
                 continue;
@@ -267,8 +310,8 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     success = false;
                     continue;
                 }
-                TypeId exprType = inferExpr(returnStmt.expr(), locals, structs, functions, diags);
-                if (!expectedReturn.equals(exprType)) {
+                TypeId exprType = inferExpr(returnStmt.expr(), locals, structs, enums, functions, diags);
+                if (!isAssignable(expectedReturn, exprType)) {
                     diags.addError("return type mismatch: expected " + expectedReturn + " got " + exprType);
                     success = false;
                 }
@@ -300,7 +343,68 @@ public final class TypeChecker implements TypeCheckerStrategy {
         return false;
     }
 
-    private TypeId inferExpr(AstExpr expr, TypeEnvironment locals, StructRegistry structs, FunctionRegistry functions, TypeEnvironment diags) {
+    private boolean checkIfLet(
+        AstIfLetStmt ifLetStmt,
+        TypeEnvironment locals,
+        StructRegistry structs,
+        EnumRegistry enums,
+        FunctionRegistry functions,
+        TypeId expectedReturn,
+        TypeEnvironment diags
+    ) {
+        TypeId targetType = inferExpr(ifLetStmt.target(), locals, structs, enums, functions, diags);
+        if (targetType == TypeId.UNKNOWN) {
+            return false;
+        }
+        if (!patternMatchesType(ifLetStmt.pattern(), targetType, enums)) {
+            diags.addError("if let pattern does not match target type");
+            return false;
+        }
+        TypeEnvironment thenLocals = locals.fork();
+        if (ifLetStmt.pattern().kind() == AstMatchPattern.Kind.ENUM) {
+            if (!bindEnumPattern(ifLetStmt.pattern(), targetType, thenLocals, structs, enums, diags)) {
+                return false;
+            }
+        }
+        boolean success = checkBlock(ifLetStmt.thenBranch(), thenLocals, structs, enums, functions, expectedReturn, diags);
+        if (ifLetStmt.elseBranch() != null) {
+            if (!checkBlock(ifLetStmt.elseBranch(), locals.fork(), structs, enums, functions, expectedReturn, diags)) {
+                success = false;
+            }
+        }
+        return success;
+    }
+
+    private boolean checkWhileLet(
+        AstWhileLetStmt whileLetStmt,
+        TypeEnvironment locals,
+        StructRegistry structs,
+        EnumRegistry enums,
+        FunctionRegistry functions,
+        TypeId expectedReturn,
+        TypeEnvironment diags
+    ) {
+        TypeId targetType = inferExpr(whileLetStmt.target(), locals, structs, enums, functions, diags);
+        if (targetType == TypeId.UNKNOWN) {
+            return false;
+        }
+        if (!patternMatchesType(whileLetStmt.pattern(), targetType, enums)) {
+            diags.addError("while let pattern does not match target type");
+            return false;
+        }
+        TypeEnvironment bodyLocals = locals.fork();
+        if (whileLetStmt.pattern().kind() == AstMatchPattern.Kind.ENUM) {
+            if (!bindEnumPattern(whileLetStmt.pattern(), targetType, bodyLocals, structs, enums, diags)) {
+                return false;
+            }
+        }
+        loopStack.push(new LoopContext(whileLetStmt.label(), false));
+        boolean success = checkBlock(whileLetStmt.body(), bodyLocals, structs, enums, functions, expectedReturn, diags);
+        loopStack.pop();
+        return success;
+    }
+
+    private TypeId inferExpr(AstExpr expr, TypeEnvironment locals, StructRegistry structs, EnumRegistry enums, FunctionRegistry functions, TypeEnvironment diags) {
         if (expr instanceof AstStringExpr) {
             return TypeId.STRING;
         }
@@ -337,8 +441,8 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     diags.addError("Unknown field '" + field.name() + "' on struct " + def.name());
                     return TypeId.UNKNOWN;
                 }
-                TypeId valueType = inferExpr(field.value(), locals, structs, functions, diags);
-                TypeId fieldType = resolveTypeName(target.type(), structs);
+                TypeId valueType = inferExpr(field.value(), locals, structs, enums, functions, diags);
+                TypeId fieldType = resolveTypeName(target.type(), structs, enums);
                 if (fieldType == TypeId.UNKNOWN) {
                     diags.addError("Unsupported field type: " + target.type());
                     return TypeId.UNKNOWN;
@@ -351,7 +455,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
             return TypeId.struct(def.name());
         }
         if (expr instanceof AstFieldAccessExpr accessExpr) {
-            TypeId targetType = inferExpr(accessExpr.target(), locals, structs, functions, diags);
+            TypeId targetType = inferExpr(accessExpr.target(), locals, structs, enums, functions, diags);
             if (!targetType.isStruct()) {
                 diags.addError("Field access on non-struct type: " + targetType);
                 return TypeId.UNKNOWN;
@@ -366,25 +470,25 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 diags.addError("Unknown field '" + accessExpr.field() + "' on struct " + def.name());
                 return TypeId.UNKNOWN;
             }
-            return resolveTypeName(field.type(), structs);
+            return resolveTypeName(field.type(), structs, enums);
         }
         if (expr instanceof AstBinaryExpr binaryExpr) {
-            return inferBinary(binaryExpr, locals, structs, functions, diags);
+            return inferBinary(binaryExpr, locals, structs, enums, functions, diags);
         }
         if (expr instanceof AstUnaryExpr unaryExpr) {
-            return inferUnary(unaryExpr, locals, structs, functions, diags);
+            return inferUnary(unaryExpr, locals, structs, enums, functions, diags);
         }
         if (expr instanceof AstCallExpr callExpr) {
-            return inferCall(callExpr, locals, structs, functions, diags);
+            return inferCall(callExpr, locals, structs, enums, functions, diags);
         }
         if (expr instanceof AstIfExpr ifExpr) {
-            TypeId condType = inferExpr(ifExpr.condition(), locals, structs, functions, diags);
+            TypeId condType = inferExpr(ifExpr.condition(), locals, structs, enums, functions, diags);
             if (condType != TypeId.BOOL) {
                 diags.addError("if expression condition must be bool");
                 return TypeId.UNKNOWN;
             }
-            TypeId thenType = inferExpr(ifExpr.thenExpr(), locals, structs, functions, diags);
-            TypeId elseType = inferExpr(ifExpr.elseExpr(), locals, structs, functions, diags);
+            TypeId thenType = inferExpr(ifExpr.thenExpr(), locals, structs, enums, functions, diags);
+            TypeId elseType = inferExpr(ifExpr.elseExpr(), locals, structs, enums, functions, diags);
             if (thenType == TypeId.UNKNOWN || elseType == TypeId.UNKNOWN) {
                 return TypeId.UNKNOWN;
             }
@@ -400,10 +504,10 @@ public final class TypeChecker implements TypeCheckerStrategy {
         }
         if (expr instanceof AstBlockExpr blockExpr) {
             TypeEnvironment blockLocals = locals.fork();
-            if (!checkBlock(blockExpr.statements(), blockLocals, structs, functions, currentReturnType, diags)) {
+            if (!checkBlock(blockExpr.statements(), blockLocals, structs, enums, functions, currentReturnType, diags)) {
                 return TypeId.UNKNOWN;
             }
-            TypeId valueType = inferExpr(blockExpr.value(), blockLocals, structs, functions, diags);
+            TypeId valueType = inferExpr(blockExpr.value(), blockLocals, structs, enums, functions, diags);
             if (valueType == TypeId.VOID) {
                 diags.addError("block expression cannot be void");
                 return TypeId.UNKNOWN;
@@ -413,7 +517,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
         if (expr instanceof AstLoopExpr loopExpr) {
             LoopContext context = new LoopContext(null, true);
             loopStack.push(context);
-            if (!checkBlock(loopExpr.body(), locals.fork(), structs, functions, currentReturnType, diags)) {
+            if (!checkBlock(loopExpr.body(), locals.fork(), structs, enums, functions, currentReturnType, diags)) {
                 loopStack.pop();
                 return TypeId.UNKNOWN;
             }
@@ -429,12 +533,12 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 diags.addError("match requires at least one arm");
                 return TypeId.UNKNOWN;
             }
-            TypeId targetType = inferExpr(matchExpr.target(), locals, structs, functions, diags);
+            TypeId targetType = inferExpr(matchExpr.target(), locals, structs, enums, functions, diags);
             if (targetType == TypeId.UNKNOWN) {
                 return TypeId.UNKNOWN;
             }
-            if (targetType != TypeId.INT && targetType != TypeId.BOOL && targetType != TypeId.STRING) {
-                diags.addError("match target must be int, bool, or String");
+            if (targetType != TypeId.INT && targetType != TypeId.BOOL && targetType != TypeId.STRING && !targetType.isEnum()) {
+                diags.addError("match target must be int, bool, String, or enum");
                 return TypeId.UNKNOWN;
             }
             boolean hasWildcard = false;
@@ -450,7 +554,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                         return TypeId.UNKNOWN;
                     }
                 } else {
-                    if (!patternMatchesType(pattern, targetType)) {
+                    if (!patternMatchesType(pattern, targetType, enums)) {
                         diags.addError("match pattern does not match target type");
                         return TypeId.UNKNOWN;
                     }
@@ -463,7 +567,13 @@ public final class TypeChecker implements TypeCheckerStrategy {
                         }
                     }
                 }
-                TypeId valueType = inferExpr(arm.expr(), locals, structs, functions, diags);
+                TypeEnvironment armLocals = locals.fork();
+                if (pattern.kind() == AstMatchPattern.Kind.ENUM) {
+                    if (!bindEnumPattern(pattern, targetType, armLocals, structs, enums, diags)) {
+                        return TypeId.UNKNOWN;
+                    }
+                }
+                TypeId valueType = inferExpr(arm.expr(), armLocals, structs, enums, functions, diags);
                 if (valueType == TypeId.UNKNOWN) {
                     return TypeId.UNKNOWN;
                 }
@@ -484,25 +594,83 @@ public final class TypeChecker implements TypeCheckerStrategy {
             return armType == null ? TypeId.UNKNOWN : armType;
         }
         if (expr instanceof AstPathExpr pathExpr) {
-            diags.addError("Unsupported path expression: " + String.join("::", pathExpr.segments()));
+            List<String> segments = pathExpr.segments();
+            if (segments.size() == 2) {
+                String enumName = segments.get(0);
+                String variantName = segments.get(1);
+                EnumRegistry.EnumDef enumDef = enums.find(enumName);
+                if (enumDef == null) {
+                    diags.addError("Unknown enum: " + enumName);
+                    return TypeId.UNKNOWN;
+                }
+                AstEnumVariant variant = enumDef.variant(variantName);
+                if (variant == null) {
+                    diags.addError("Unknown variant '" + variantName + "' on enum " + enumName);
+                    return TypeId.UNKNOWN;
+                }
+                if (variant.payloadType() != null) {
+                    diags.addError("Variant '" + variantName + "' requires a value");
+                    return TypeId.UNKNOWN;
+                }
+                return TypeId.enumType(enumName);
+            }
+            diags.addError("Unsupported path expression: " + String.join("::", segments));
             return TypeId.UNKNOWN;
         }
         diags.addError("Unsupported expression: " + expr.getClass().getSimpleName());
         return TypeId.UNKNOWN;
     }
 
-    private TypeId inferCall(AstCallExpr callExpr, TypeEnvironment locals, StructRegistry structs, FunctionRegistry functions, TypeEnvironment diags) {
+    private TypeId inferCall(AstCallExpr callExpr, TypeEnvironment locals, StructRegistry structs, EnumRegistry enums, FunctionRegistry functions, TypeEnvironment diags) {
         if (isPrintCall(callExpr)) {
             if (callExpr.args().size() != 1) {
                 diags.addError("print expects exactly one argument");
                 return TypeId.UNKNOWN;
             }
-            TypeId argType = inferExpr(callExpr.args().get(0), locals, structs, functions, diags);
+            TypeId argType = inferExpr(callExpr.args().get(0), locals, structs, enums, functions, diags);
             if (!argType.isPrintable()) {
                 diags.addError("print does not support type: " + argType);
                 return TypeId.UNKNOWN;
             }
             return TypeId.VOID;
+        }
+
+        if (callExpr.callee().size() == 2) {
+            String enumName = callExpr.callee().get(0);
+            String variantName = callExpr.callee().get(1);
+            EnumRegistry.EnumDef enumDef = enums.find(enumName);
+            if (enumDef == null) {
+                diags.addError("Unknown enum: " + enumName);
+                return TypeId.UNKNOWN;
+            }
+            AstEnumVariant variant = enumDef.variant(variantName);
+            if (variant == null) {
+                diags.addError("Unknown variant '" + variantName + "' on enum " + enumName);
+                return TypeId.UNKNOWN;
+            }
+            if (variant.payloadType() == null) {
+                diags.addError("Variant '" + variantName + "' does not take a value");
+                return TypeId.UNKNOWN;
+            }
+            if (callExpr.args().size() != 1) {
+                diags.addError("Variant '" + variantName + "' expects one argument");
+                return TypeId.UNKNOWN;
+            }
+            TypeId argType = inferExpr(callExpr.args().get(0), locals, structs, enums, functions, diags);
+            TypeId payloadType = resolveTypeName(variant.payloadType(), structs, enums);
+            if (payloadType == TypeId.UNKNOWN) {
+                diags.addError("Unknown payload type: " + variant.payloadType());
+                return TypeId.UNKNOWN;
+            }
+            if (payloadType != TypeId.ANY && !payloadType.equals(argType)) {
+                diags.addError("Variant '" + variantName + "' expects " + payloadType + " got " + argType);
+                return TypeId.UNKNOWN;
+            }
+            if (payloadType == TypeId.ANY && argType == TypeId.VOID) {
+                diags.addError("Variant '" + variantName + "' cannot take void");
+                return TypeId.UNKNOWN;
+            }
+            return TypeId.enumType(enumName);
         }
 
         if (callExpr.callee().size() != 1) {
@@ -524,8 +692,8 @@ public final class TypeChecker implements TypeCheckerStrategy {
 
         List<TypeId> paramTypes = sig.paramTypes();
         for (int i = 0; i < callExpr.args().size(); i++) {
-            TypeId argType = inferExpr(callExpr.args().get(i), locals, structs, functions, diags);
-            if (!paramTypes.get(i).equals(argType)) {
+            TypeId argType = inferExpr(callExpr.args().get(i), locals, structs, enums, functions, diags);
+            if (!isAssignable(paramTypes.get(i), argType)) {
                 diags.addError("Argument " + (i + 1) + " of '" + name + "' expected " + paramTypes.get(i) + " got " + argType);
                 return TypeId.UNKNOWN;
             }
@@ -534,9 +702,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
         return sig.returnType();
     }
 
-    private TypeId inferBinary(AstBinaryExpr expr, TypeEnvironment locals, StructRegistry structs, FunctionRegistry functions, TypeEnvironment diags) {
-        TypeId left = inferExpr(expr.left(), locals, structs, functions, diags);
-        TypeId right = inferExpr(expr.right(), locals, structs, functions, diags);
+    private TypeId inferBinary(AstBinaryExpr expr, TypeEnvironment locals, StructRegistry structs, EnumRegistry enums, FunctionRegistry functions, TypeEnvironment diags) {
+        TypeId left = inferExpr(expr.left(), locals, structs, enums, functions, diags);
+        TypeId right = inferExpr(expr.right(), locals, structs, enums, functions, diags);
         String op = expr.operator();
 
         if ("+".equals(op) || "-".equals(op) || "*".equals(op) || "/".equals(op)) {
@@ -556,7 +724,8 @@ public final class TypeChecker implements TypeCheckerStrategy {
         }
 
         if ("==".equals(op) || "!=".equals(op)) {
-            if (left.equals(right) && (left == TypeId.INT || left == TypeId.BOOL || left == TypeId.STRING || left.isStruct())) {
+            if (left.equals(right)
+                && (left == TypeId.INT || left == TypeId.BOOL || left == TypeId.STRING || left == TypeId.ANY || left.isStruct() || left.isEnum())) {
                 return TypeId.BOOL;
             }
             diags.addError("Equality requires matching operand types");
@@ -575,8 +744,8 @@ public final class TypeChecker implements TypeCheckerStrategy {
         return TypeId.UNKNOWN;
     }
 
-    private TypeId inferUnary(AstUnaryExpr expr, TypeEnvironment locals, StructRegistry structs, FunctionRegistry functions, TypeEnvironment diags) {
-        TypeId right = inferExpr(expr.expr(), locals, structs, functions, diags);
+    private TypeId inferUnary(AstUnaryExpr expr, TypeEnvironment locals, StructRegistry structs, EnumRegistry enums, FunctionRegistry functions, TypeEnvironment diags) {
+        TypeId right = inferExpr(expr.expr(), locals, structs, enums, functions, diags);
         if ("!".equals(expr.operator())) {
             if (right == TypeId.BOOL) {
                 return TypeId.BOOL;
@@ -595,18 +764,18 @@ public final class TypeChecker implements TypeCheckerStrategy {
         return TypeId.UNKNOWN;
     }
 
-    private TypeId resolveReturnType(String name, StructRegistry structs, TypeEnvironment diags) {
+    private TypeId resolveReturnType(String name, StructRegistry structs, EnumRegistry enums, TypeEnvironment diags) {
         if (name == null) {
             return TypeId.VOID;
         }
-        TypeId type = resolveTypeName(name, structs);
+        TypeId type = resolveTypeName(name, structs, enums);
         if (type == TypeId.UNKNOWN) {
             diags.addError("Unknown type: " + name);
         }
         return type;
     }
 
-    private TypeId resolveTypeName(String name, StructRegistry structs) {
+    private TypeId resolveTypeName(String name, StructRegistry structs, EnumRegistry enums) {
         TypeId base = TypeId.fromTypeName(name);
         if (base != TypeId.UNKNOWN) {
             return base;
@@ -614,7 +783,31 @@ public final class TypeChecker implements TypeCheckerStrategy {
         if (structs.find(name) != null) {
             return TypeId.struct(name);
         }
+        if (enums.find(name) != null) {
+            return TypeId.enumType(name);
+        }
         return TypeId.UNKNOWN;
+    }
+
+    private void registerBuiltinEnums(EnumRegistry enums) {
+        List<AstEnumVariant> optionVariants = List.of(
+            new AstEnumVariant("Some", "Any"),
+            new AstEnumVariant("None", null)
+        );
+        enums.register(new AstEnum("Option", optionVariants));
+
+        List<AstEnumVariant> resultVariants = List.of(
+            new AstEnumVariant("Ok", "Any"),
+            new AstEnumVariant("Err", "Any")
+        );
+        enums.register(new AstEnum("Result", resultVariants));
+    }
+
+    private boolean isAssignable(TypeId expected, TypeId actual) {
+        if (expected == TypeId.ANY) {
+            return actual != TypeId.VOID && actual != TypeId.UNKNOWN;
+        }
+        return expected.equals(actual);
     }
 
     private boolean isPrintCall(AstCallExpr callExpr) {
@@ -626,7 +819,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
             && "print".equals(callExpr.callee().get(1));
     }
 
-    private boolean checkBreak(AstBreakStmt breakStmt, TypeEnvironment locals, StructRegistry structs, FunctionRegistry functions, TypeEnvironment diags) {
+    private boolean checkBreak(AstBreakStmt breakStmt, TypeEnvironment locals, StructRegistry structs, EnumRegistry enums, FunctionRegistry functions, TypeEnvironment diags) {
         LoopContext context = resolveLoopContext(breakStmt.label(), diags, "break");
         if (context == null) {
             return false;
@@ -636,14 +829,14 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 diags.addError("break with value is only allowed in loop expressions");
                 return false;
             }
-            TypeId valueType = inferExpr(breakStmt.expr(), locals, structs, functions, diags);
+            TypeId valueType = inferExpr(breakStmt.expr(), locals, structs, enums, functions, diags);
             if (valueType == TypeId.UNKNOWN || valueType == TypeId.VOID) {
                 diags.addError("break value must be a non-void expression");
                 return false;
             }
             if (context.breakType == null) {
                 context.breakType = valueType;
-            } else if (!context.breakType.equals(valueType)) {
+            } else if (!isAssignable(context.breakType, valueType)) {
                 diags.addError("break values in loop expression must have the same type");
                 return false;
             }
@@ -679,14 +872,63 @@ public final class TypeChecker implements TypeCheckerStrategy {
         return null;
     }
 
-    private boolean patternMatchesType(AstMatchPattern pattern, TypeId targetType) {
+    private boolean patternMatchesType(AstMatchPattern pattern, TypeId targetType, EnumRegistry enums) {
         return switch (pattern.kind()) {
             case WILDCARD -> true;
             case INT -> targetType == TypeId.INT;
             case BOOL -> targetType == TypeId.BOOL;
             case STRING -> targetType == TypeId.STRING;
             case RANGE -> targetType == TypeId.INT;
+            case ENUM -> {
+                if (!targetType.isEnum()) {
+                    yield false;
+                }
+                if (!targetType.enumName().equals(pattern.enumName())) {
+                    yield false;
+                }
+                EnumRegistry.EnumDef def = enums.find(targetType.enumName());
+                if (def == null) {
+                    yield false;
+                }
+                AstEnumVariant variant = def.variant(pattern.variantName());
+                yield variant != null;
+            }
         };
+    }
+
+    private boolean bindEnumPattern(AstMatchPattern pattern, TypeId targetType, TypeEnvironment locals, StructRegistry structs, EnumRegistry enums, TypeEnvironment diags) {
+        if (!targetType.isEnum()) {
+            diags.addError("enum pattern used on non-enum type");
+            return false;
+        }
+        if (!targetType.enumName().equals(pattern.enumName())) {
+            diags.addError("enum pattern does not match target enum");
+            return false;
+        }
+        EnumRegistry.EnumDef def = enums.find(targetType.enumName());
+        if (def == null) {
+            diags.addError("Unknown enum: " + targetType.enumName());
+            return false;
+        }
+        AstEnumVariant variant = def.variant(pattern.variantName());
+        if (variant == null) {
+            diags.addError("Unknown variant '" + pattern.variantName() + "' on enum " + def.name());
+            return false;
+        }
+        if (pattern.binding() == null) {
+            return true;
+        }
+        if (variant.payloadType() == null) {
+            diags.addError("Variant '" + variant.name() + "' does not bind a value");
+            return false;
+        }
+        TypeId payloadType = resolveTypeName(variant.payloadType(), structs, enums);
+        if (payloadType == TypeId.UNKNOWN) {
+            diags.addError("Unknown payload type: " + variant.payloadType());
+            return false;
+        }
+        locals.define(pattern.binding(), payloadType, false);
+        return true;
     }
 
     private static final class LoopContext {
