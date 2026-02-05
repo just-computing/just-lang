@@ -11,7 +11,7 @@ public final class TypeEnvironment {
     private final List<String> warnings = new ArrayList<>();
 
     public void define(String name, TypeId type, boolean mutable) {
-        locals.put(name, new Binding(type, mutable));
+        locals.put(name, new Binding(type, mutable, false));
     }
 
     public TypeEnvironment fork() {
@@ -22,6 +22,22 @@ public final class TypeEnvironment {
 
     public Binding lookup(String name) {
         return locals.get(name);
+    }
+
+    public void markMoved(String name) {
+        Binding binding = locals.get(name);
+        if (binding == null) {
+            return;
+        }
+        locals.put(name, new Binding(binding.type(), binding.mutable(), true));
+    }
+
+    public void clearMoved(String name) {
+        Binding binding = locals.get(name);
+        if (binding == null) {
+            return;
+        }
+        locals.put(name, new Binding(binding.type(), binding.mutable(), false));
     }
 
     public void addError(String message) {
@@ -40,5 +56,5 @@ public final class TypeEnvironment {
         return warnings;
     }
 
-    public record Binding(TypeId type, boolean mutable) {}
+    public record Binding(TypeId type, boolean mutable, boolean moved) {}
 }

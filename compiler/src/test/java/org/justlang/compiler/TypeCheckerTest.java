@@ -1692,6 +1692,168 @@ public class TypeCheckerTest {
         assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Unknown parameter type: &mut Missing")));
     }
 
+    @Test
+    void useAfterMoveFails() {
+        TypeResult result = typeCheck("""
+            struct Item { value: i32 }
+
+            fn main() {
+                let item = Item { value: 1 };
+                let other = item;
+                std::print(other.value);
+                std::print(item.value);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Use of moved value: item")));
+    }
+
+    @Test
+    void copyTypeCanBeUsedAfterAssignment() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let x = 1;
+                let y = x;
+                std::print(x);
+                std::print(y);
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void functionCallMovesNonCopyArgument() {
+        TypeResult result = typeCheck("""
+            struct Item { value: i32 }
+
+            fn consume(item: Item) {
+                std::print(item.value);
+                return;
+            }
+
+            fn main() {
+                let item = Item { value: 7 };
+                consume(item);
+                consume(item);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Use of moved value: item")));
+    }
+
+    @Test
+    void mutableBindingCanBeReinitializedAfterMove() {
+        TypeResult result = typeCheck("""
+            struct Item { value: i32 }
+
+            fn main() {
+                let mut item = Item { value: 1 };
+                let moved = item;
+                std::print(moved.value);
+                item = Item { value: 2 };
+                std::print(item.value);
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void movingBorrowedValueFails() {
+        TypeResult result = typeCheck("""
+            struct Item { value: i32 }
+
+            fn main() {
+                let item = Item { value: 1 };
+                let r = &item;
+                let moved = item;
+                std::print(r);
+                std::print(moved.value);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Cannot move 'item' while it is borrowed")));
+    }
+
+    @Test
+    void movedBindingCannotUseCompoundAssignment() {
+        TypeResult result = typeCheck("""
+            struct Item { value: i32 }
+
+            fn main() {
+                let mut item = Item { value: 1 };
+                let moved = item;
+                item += 1;
+                std::print(moved.value);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Use of moved value: item")));
+    }
+
+    @Test
+    void assignmentCannotMoveBorrowedValue() {
+        TypeResult result = typeCheck("""
+            struct Item { value: i32 }
+
+            fn main() {
+                let mut src = Item { value: 1 };
+                let mut dst = Item { value: 2 };
+                let r = &src;
+                dst = src;
+                std::print(r);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Cannot move 'src' while it is borrowed")));
+    }
+
+    @Test
+    void referenceInnerTypeMismatchInCallFails() {
+        TypeResult result = typeCheck("""
+            fn takes(x: &i32) {
+                std::print(*x);
+                return;
+            }
+
+            fn main() {
+                let b = true;
+                takes(&b);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Argument 1 of 'takes' expected &Int got &Bool")));
+    }
+
+    @Test
+    void referenceToVoidTypeFails() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let x: &void = 1;
+                std::print(x);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Unknown type: &void")));
+    }
+
     private TypeResult typeCheck(String source) {
         Diagnostics diagnostics = new Diagnostics();
         SourceFile sourceFile = new SourceFile(Path.of("test.just"), source);

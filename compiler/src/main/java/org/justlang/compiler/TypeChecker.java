@@ -189,6 +189,10 @@ public final class TypeChecker implements TypeCheckerStrategy {
                         success = false;
                         continue;
                     }
+                    if (!consumeMoveCandidate(letStmt.initializer(), exprType, locals, diagnostics)) {
+                        success = false;
+                        continue;
+                    }
                     TypeId finalType = declaredType != null ? declaredType : exprType;
                     if (currentBorrows != null) {
                         currentBorrows.releaseBindingLoan(letStmt.name());
@@ -203,6 +207,12 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     TypeEnvironment.Binding binding = locals.lookup(assignStmt.name());
                     if (binding == null) {
                         diagnostics.addError("Unknown identifier: " + assignStmt.name());
+                        success = false;
+                        continue;
+                    }
+                    String op = assignStmt.operator();
+                    if (binding.moved() && !"=".equals(op)) {
+                        diagnostics.addError("Use of moved value: " + assignStmt.name());
                         success = false;
                         continue;
                     }
@@ -226,10 +236,11 @@ public final class TypeChecker implements TypeCheckerStrategy {
                         success = false;
                         continue;
                     }
-                    String op = assignStmt.operator();
                     if ("=".equals(op)) {
                         if (!isAssignable(binding.type(), valueType)) {
                             diagnostics.addError("Type mismatch in assignment to " + assignStmt.name());
+                            success = false;
+                        } else if (!consumeMoveCandidate(assignStmt.value(), valueType, locals, diagnostics)) {
                             success = false;
                         }
                     } else {
@@ -245,6 +256,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
                         if (!registerPersistentBorrow(assignStmt.name(), assignStmt.value(), locals, diagnostics)) {
                             success = false;
                         }
+                    }
+                    if ("=".equals(op) && success) {
+                        locals.clearMoved(assignStmt.name());
                     }
                     continue;
                 }
@@ -416,6 +430,34 @@ public final class TypeChecker implements TypeCheckerStrategy {
         return "&".equals(operator) || "&mut".equals(operator);
     }
 
+    private boolean consumeMoveCandidate(AstExpr expr, TypeId exprType, TypeEnvironment locals, TypeEnvironment diagnostics) {
+        if (exprType == TypeId.UNKNOWN || exprType == TypeId.VOID || isCopyType(exprType)) {
+            return true;
+        }
+        if (!(expr instanceof AstIdentExpr identExpr)) {
+            return true;
+        }
+        TypeEnvironment.Binding binding = locals.lookup(identExpr.name());
+        if (binding == null) {
+            diagnostics.addError("Unknown identifier: " + identExpr.name());
+            return false;
+        }
+        if (binding.moved()) {
+            diagnostics.addError("Use of moved value: " + identExpr.name());
+            return false;
+        }
+        if (currentBorrows != null && currentBorrows.hasActiveBorrow(identExpr.name())) {
+            diagnostics.addError("Cannot move '" + identExpr.name() + "' while it is borrowed");
+            return false;
+        }
+        locals.markMoved(identExpr.name());
+        return true;
+    }
+
+    private boolean isCopyType(TypeId type) {
+        return type == TypeId.INT || type == TypeId.BOOL || type.isReference();
+    }
+
     private boolean checkIfLet(
         AstIfLetStmt ifLetStmt,
         TypeEnvironment locals,
@@ -493,6 +535,10 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 diagnostics.addError("Unknown identifier: " + identExpr.name());
                 return TypeId.UNKNOWN;
             }
+            if (binding.moved()) {
+                diagnostics.addError("Use of moved value: " + identExpr.name());
+                return TypeId.UNKNOWN;
+            }
             return binding.type();
         }
         if (expr instanceof AstStructInitExpr initExpr) {
@@ -522,6 +568,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 }
                 if (!fieldType.equals(valueType)) {
                     diagnostics.addError("Type mismatch for field '" + field.name() + "': expected " + fieldType + " got " + valueType);
+                    return TypeId.UNKNOWN;
+                }
+                if (!consumeMoveCandidate(field.value(), valueType, locals, diagnostics)) {
                     return TypeId.UNKNOWN;
                 }
             }
@@ -608,6 +657,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
             }
             TypeId targetType = inferExpr(matchExpr.target(), locals, structs, enums, functions, diagnostics);
             if (targetType == TypeId.UNKNOWN) {
+                return TypeId.UNKNOWN;
+            }
+            if (!consumeMoveCandidate(matchExpr.target(), targetType, locals, diagnostics)) {
                 return TypeId.UNKNOWN;
             }
             if (targetType != TypeId.INT && targetType != TypeId.BOOL && targetType != TypeId.STRING && !targetType.isEnum()) {
@@ -764,6 +816,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
                         diagnostics.addError("Variant 'Some' cannot take void");
                         return TypeId.UNKNOWN;
                     }
+                    if (!consumeMoveCandidate(callExpr.args().get(0), argType, locals, diagnostics)) {
+                        return TypeId.UNKNOWN;
+                    }
                     return TypeId.option(argType);
                 }
                 if ("None".equals(variantName)) {
@@ -785,6 +840,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
                         diagnostics.addError("Variant 'Ok' cannot take void");
                         return TypeId.UNKNOWN;
                     }
+                    if (!consumeMoveCandidate(callExpr.args().get(0), argType, locals, diagnostics)) {
+                        return TypeId.UNKNOWN;
+                    }
                     return TypeId.result(argType, TypeId.INFER);
                 }
                 if ("Err".equals(variantName)) {
@@ -795,6 +853,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     TypeId argType = inferExpr(callExpr.args().get(0), locals, structs, enums, functions, diagnostics);
                     if (argType == TypeId.UNKNOWN || argType == TypeId.VOID) {
                         diagnostics.addError("Variant 'Err' cannot take void");
+                        return TypeId.UNKNOWN;
+                    }
+                    if (!consumeMoveCandidate(callExpr.args().get(0), argType, locals, diagnostics)) {
                         return TypeId.UNKNOWN;
                     }
                     return TypeId.result(TypeId.INFER, argType);
@@ -832,6 +893,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 diagnostics.addError("Variant '" + variantName + "' cannot take void");
                 return TypeId.UNKNOWN;
             }
+            if (!consumeMoveCandidate(callExpr.args().get(0), argType, locals, diagnostics)) {
+                return TypeId.UNKNOWN;
+            }
             return TypeId.enumType(enumName);
         }
 
@@ -857,6 +921,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
             TypeId argType = inferExpr(callExpr.args().get(i), locals, structs, enums, functions, diagnostics);
             if (!isAssignable(paramTypes.get(i), argType)) {
                 diagnostics.addError("Argument " + (i + 1) + " of '" + name + "' expected " + paramTypes.get(i) + " got " + argType);
+                return TypeId.UNKNOWN;
+            }
+            if (!paramTypes.get(i).isReference() && !consumeMoveCandidate(callExpr.args().get(i), argType, locals, diagnostics)) {
                 return TypeId.UNKNOWN;
             }
         }
