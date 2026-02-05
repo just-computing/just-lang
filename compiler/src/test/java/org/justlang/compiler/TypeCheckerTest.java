@@ -1499,6 +1499,199 @@ public class TypeCheckerTest {
         assertTrue(diagnostics5.errors().stream().anyMatch(err -> err.contains("Unknown enum: Ghost")));
     }
 
+    @Test
+    void sharedBorrowsAreAllowed() {
+        TypeResult result = typeCheck("""
+            fn read(x: &i32) -> i32 {
+                return *x;
+            }
+
+            fn main() {
+                let value = 10;
+                let a = &value;
+                let b = &value;
+                std::print(read(a));
+                std::print(*b);
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void mutableBorrowConflictsWithExistingSharedBorrow() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let mut value = 1;
+                let r = &value;
+                let w = &mut value;
+                std::print(*r);
+                std::print(*w);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Cannot take mutable borrow of 'value'")));
+    }
+
+    @Test
+    void mutableBorrowRequiresMutableBinding() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let value = 1;
+                let r = &mut value;
+                std::print(*r);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Cannot take mutable borrow of immutable variable: value")));
+    }
+
+    @Test
+    void assignmentWhileBorrowedFails() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let mut value = 1;
+                let r = &value;
+                value = 2;
+                std::print(*r);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Cannot assign to 'value' while it is borrowed")));
+    }
+
+    @Test
+    void borrowReleasedAtEndOfScope() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let mut value = 1;
+                if true {
+                    let r = &value;
+                    std::print(*r);
+                } else {
+                    return;
+                }
+                value = 2;
+                std::print(value);
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void dereferenceRequiresReferenceOperand() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let x = *1;
+                std::print(x);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Unary * requires reference operand")));
+    }
+
+    @Test
+    void sharedBorrowConflictsWithActiveMutableBorrow() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let mut value = 1;
+                let w = &mut value;
+                let r = &value;
+                std::print(*w);
+                std::print(*r);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Cannot take shared borrow of 'value' while a mutable borrow is active")));
+    }
+
+    @Test
+    void mutableReferenceReassignmentReleasesPreviousBorrow() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let mut a = 1;
+                let mut b = 2;
+                let mut r = &mut a;
+                r = &mut b;
+                a = 3;
+                std::print(*r);
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void mutableReferenceParameterTypeChecks() {
+        TypeResult result = typeCheck("""
+            fn take_mut(x: &mut i32) {
+                std::print(*x);
+                return;
+            }
+
+            fn main() {
+                let mut value = 9;
+                take_mut(&mut value);
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void equalityAndLogicalOperatorsOnBoolValuesSucceed() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let eq = 1 == 1;
+                let both = true && false;
+                let either = true || false;
+                std::print(eq);
+                std::print(both);
+                std::print(either);
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void malformedReferenceTypeInParamFails() {
+        AstParam param = new AstParam("x", "&", false);
+        AstFunction fn = new AstFunction("foo", List.of(param), null, List.of(new AstReturnStmt(null)));
+        AstModule module = new AstModule(List.of(fn));
+
+        TypeResult result = new TypeChecker().typeCheck(module);
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Unknown parameter type: &")));
+    }
+
+    @Test
+    void referenceTypeWithUnknownInnerFails() {
+        AstParam param = new AstParam("x", "&mut Missing", false);
+        AstFunction fn = new AstFunction("foo", List.of(param), null, List.of(new AstReturnStmt(null)));
+        AstModule module = new AstModule(List.of(fn));
+
+        TypeResult result = new TypeChecker().typeCheck(module);
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Unknown parameter type: &mut Missing")));
+    }
+
     private TypeResult typeCheck(String source) {
         Diagnostics diagnostics = new Diagnostics();
         SourceFile sourceFile = new SourceFile(Path.of("test.just"), source);

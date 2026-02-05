@@ -7,9 +7,13 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import org.justlang.compiler.borrow.BorrowTracker;
+import org.justlang.compiler.borrow.LexicalBorrowTracker;
+
 public final class TypeChecker implements TypeCheckerStrategy {
     private TypeId currentReturnType = TypeId.VOID;
     private final Deque<LoopContext> loopStack = new ArrayDeque<>();
+    private BorrowTracker currentBorrows;
 
     public TypedModule typeCheck(HirModule module) {
         throw new UnsupportedOperationException("Type checker not implemented yet");
@@ -120,11 +124,14 @@ public final class TypeChecker implements TypeCheckerStrategy {
         }
 
         TypeId previousReturn = currentReturnType;
+        BorrowTracker previousBorrows = currentBorrows;
         currentReturnType = expectedReturn;
+        currentBorrows = new LexicalBorrowTracker();
         if (!checkBlock(fn.body(), locals, structs, enums, functions, expectedReturn, diagnostics)) {
             success = false;
         }
         currentReturnType = previousReturn;
+        currentBorrows = previousBorrows;
 
         if (expectedReturn != TypeId.VOID && !endsWithReturnValue(fn.body())) {
             diagnostics.addError("Non-void functions must return on all paths");
@@ -144,79 +151,103 @@ public final class TypeChecker implements TypeCheckerStrategy {
         TypeEnvironment diagnostics
     ) {
         boolean success = true;
-        for (AstStmt stmt : statements) {
-            if (stmt instanceof AstLetStmt letStmt) {
-                if (letStmt.initializer() == null) {
-                    diagnostics.addError("let without initializer is not supported yet");
-                    success = false;
-                    continue;
-                }
-                TypeId declaredType = null;
-                if (letStmt.type() != null) {
-                    declaredType = resolveTypeName(letStmt.type(), structs, enums);
-                    if (declaredType == TypeId.UNKNOWN) {
-                        diagnostics.addError("Unknown type: " + letStmt.type());
+        if (currentBorrows != null) {
+            currentBorrows.enterScope();
+        }
+        try {
+            for (AstStmt stmt : statements) {
+                if (stmt instanceof AstLetStmt letStmt) {
+                    if (letStmt.initializer() == null) {
+                        diagnostics.addError("let without initializer is not supported yet");
                         success = false;
                         continue;
                     }
-                    if (declaredType == TypeId.VOID) {
-                        diagnostics.addError("let type cannot be void");
+                    TypeId declaredType = null;
+                    if (letStmt.type() != null) {
+                        declaredType = resolveTypeName(letStmt.type(), structs, enums);
+                        if (declaredType == TypeId.UNKNOWN) {
+                            diagnostics.addError("Unknown type: " + letStmt.type());
+                            success = false;
+                            continue;
+                        }
+                        if (declaredType == TypeId.VOID) {
+                            diagnostics.addError("let type cannot be void");
+                            success = false;
+                            continue;
+                        }
+                    }
+                    TypeId exprType = inferExpr(letStmt.initializer(), locals, structs, enums, functions, diagnostics);
+                    if (exprType == TypeId.UNKNOWN || exprType == TypeId.VOID) {
+                        if (exprType == TypeId.VOID) {
+                            diagnostics.addError("let initializer cannot be void");
+                        }
                         success = false;
                         continue;
                     }
-                }
-                TypeId exprType = inferExpr(letStmt.initializer(), locals, structs, enums, functions, diagnostics);
-                if (exprType == TypeId.UNKNOWN || exprType == TypeId.VOID) {
-                    if (exprType == TypeId.VOID) {
-                        diagnostics.addError("let initializer cannot be void");
+                    if (declaredType != null && !isAssignable(declaredType, exprType)) {
+                        diagnostics.addError("Type mismatch in let binding '" + letStmt.name() + "': expected " + declaredType + " got " + exprType);
+                        success = false;
+                        continue;
                     }
-                    success = false;
-                    continue;
-                }
-                if (declaredType != null && !isAssignable(declaredType, exprType)) {
-                    diagnostics.addError("Type mismatch in let binding '" + letStmt.name() + "': expected " + declaredType + " got " + exprType);
-                    success = false;
-                    continue;
-                }
-                locals.define(letStmt.name(), declaredType != null ? declaredType : exprType, letStmt.mutable());
-                continue;
-            }
-            if (stmt instanceof AstAssignStmt assignStmt) {
-                TypeEnvironment.Binding binding = locals.lookup(assignStmt.name());
-                if (binding == null) {
-                    diagnostics.addError("Unknown identifier: " + assignStmt.name());
-                    success = false;
-                    continue;
-                }
-                if (!binding.mutable()) {
-                    diagnostics.addError("Cannot assign to immutable variable: " + assignStmt.name());
-                    success = false;
-                    continue;
-                }
-                TypeId valueType = inferExpr(assignStmt.value(), locals, structs, enums, functions, diagnostics);
-                if (valueType == TypeId.UNKNOWN) {
-                    success = false;
-                    continue;
-                }
-                if (valueType == TypeId.VOID) {
-                    diagnostics.addError("assignment value cannot be void");
-                    success = false;
-                    continue;
-                }
-                String op = assignStmt.operator();
-                if ("=".equals(op)) {
-                    if (!isAssignable(binding.type(), valueType)) {
-                        diagnostics.addError("Type mismatch in assignment to " + assignStmt.name());
+                    TypeId finalType = declaredType != null ? declaredType : exprType;
+                    if (currentBorrows != null) {
+                        currentBorrows.releaseBindingLoan(letStmt.name());
+                    }
+                    locals.define(letStmt.name(), finalType, letStmt.mutable());
+                    if (!registerPersistentBorrow(letStmt.name(), letStmt.initializer(), locals, diagnostics)) {
                         success = false;
                     }
-                } else {
-                    if (binding.type() != TypeId.INT || valueType != TypeId.INT) {
-                        diagnostics.addError("Compound assignment requires int operands");
-                        success = false;
-                    }
+                    continue;
                 }
-                continue;
-            }
+                if (stmt instanceof AstAssignStmt assignStmt) {
+                    TypeEnvironment.Binding binding = locals.lookup(assignStmt.name());
+                    if (binding == null) {
+                        diagnostics.addError("Unknown identifier: " + assignStmt.name());
+                        success = false;
+                        continue;
+                    }
+                    if (!binding.mutable()) {
+                        diagnostics.addError("Cannot assign to immutable variable: " + assignStmt.name());
+                        success = false;
+                        continue;
+                    }
+                    if (currentBorrows != null && currentBorrows.hasActiveBorrow(assignStmt.name())) {
+                        diagnostics.addError("Cannot assign to '" + assignStmt.name() + "' while it is borrowed");
+                        success = false;
+                        continue;
+                    }
+                    TypeId valueType = inferExpr(assignStmt.value(), locals, structs, enums, functions, diagnostics);
+                    if (valueType == TypeId.UNKNOWN) {
+                        success = false;
+                        continue;
+                    }
+                    if (valueType == TypeId.VOID) {
+                        diagnostics.addError("assignment value cannot be void");
+                        success = false;
+                        continue;
+                    }
+                    String op = assignStmt.operator();
+                    if ("=".equals(op)) {
+                        if (!isAssignable(binding.type(), valueType)) {
+                            diagnostics.addError("Type mismatch in assignment to " + assignStmt.name());
+                            success = false;
+                        }
+                    } else {
+                        if (binding.type() != TypeId.INT || valueType != TypeId.INT) {
+                            diagnostics.addError("Compound assignment requires int operands");
+                            success = false;
+                        }
+                    }
+                    if (success && "=".equals(op) && binding.type().isReference()) {
+                        if (currentBorrows != null) {
+                            currentBorrows.releaseBindingLoan(assignStmt.name());
+                        }
+                        if (!registerPersistentBorrow(assignStmt.name(), assignStmt.value(), locals, diagnostics)) {
+                            success = false;
+                        }
+                    }
+                    continue;
+                }
             if (stmt instanceof AstExprStmt exprStmt) {
                 TypeId exprType = inferExpr(exprStmt.expr(), locals, structs, enums, functions, diagnostics);
                 if (exprType == TypeId.UNKNOWN) {
@@ -324,6 +355,11 @@ public final class TypeChecker implements TypeCheckerStrategy {
             diagnostics.addError("Unsupported statement: " + stmt.getClass().getSimpleName());
             success = false;
         }
+        } finally {
+            if (currentBorrows != null) {
+                currentBorrows.exitScope();
+            }
+        }
         return success;
     }
 
@@ -345,6 +381,39 @@ public final class TypeChecker implements TypeCheckerStrategy {
             }
         }
         return false;
+    }
+
+    private boolean registerPersistentBorrow(String bindingName, AstExpr initializer, TypeEnvironment locals, TypeEnvironment diagnostics) {
+        if (currentBorrows == null) {
+            return true;
+        }
+        if (!(initializer instanceof AstUnaryExpr unaryExpr)) {
+            return true;
+        }
+        if (!isBorrowOperator(unaryExpr.operator())) {
+            return true;
+        }
+        if (!(unaryExpr.expr() instanceof AstIdentExpr identExpr)) {
+            diagnostics.addError("Borrow target must be an identifier");
+            return false;
+        }
+        TypeEnvironment.Binding targetBinding = locals.lookup(identExpr.name());
+        if (targetBinding == null) {
+            diagnostics.addError("Unknown identifier: " + identExpr.name());
+            return false;
+        }
+        boolean mutableBorrow = "&mut".equals(unaryExpr.operator());
+        String conflict = currentBorrows.borrowConflict(identExpr.name(), mutableBorrow);
+        if (conflict != null) {
+            diagnostics.addError(conflict);
+            return false;
+        }
+        currentBorrows.addBindingBorrow(bindingName, identExpr.name(), mutableBorrow);
+        return true;
+    }
+
+    private boolean isBorrowOperator(String operator) {
+        return "&".equals(operator) || "&mut".equals(operator);
     }
 
     private boolean checkIfLet(
@@ -837,8 +906,42 @@ public final class TypeChecker implements TypeCheckerStrategy {
         return TypeId.UNKNOWN;
     }
 
+    // Type-checks unary operators, including borrow operators used by let-bindings and expressions.
+    // This method is called from inferExpr whenever the parser produces an AstUnaryExpr node.
     private TypeId inferUnary(AstUnaryExpr expr, TypeEnvironment locals, StructRegistry structs, EnumRegistry enums, FunctionRegistry functions, TypeEnvironment diagnostics) {
+        if (isBorrowOperator(expr.operator())) {
+            boolean mutableBorrow = "&mut".equals(expr.operator());
+            if (!(expr.expr() instanceof AstIdentExpr identExpr)) {
+                diagnostics.addError("Borrow target must be an identifier");
+                return TypeId.UNKNOWN;
+            }
+            TypeEnvironment.Binding binding = locals.lookup(identExpr.name());
+            if (binding == null) {
+                diagnostics.addError("Unknown identifier: " + identExpr.name());
+                return TypeId.UNKNOWN;
+            }
+            if (mutableBorrow && !binding.mutable()) {
+                diagnostics.addError("Cannot take mutable borrow of immutable variable: " + identExpr.name());
+                return TypeId.UNKNOWN;
+            }
+            if (currentBorrows != null) {
+                // Reject conflicting borrows immediately so invalid borrow graphs never enter the environment.
+                String conflict = currentBorrows.borrowConflict(identExpr.name(), mutableBorrow);
+                if (conflict != null) {
+                    diagnostics.addError(conflict);
+                    return TypeId.UNKNOWN;
+                }
+            }
+            return TypeId.reference(binding.type(), mutableBorrow);
+        }
         TypeId right = inferExpr(expr.expr(), locals, structs, enums, functions, diagnostics);
+        if ("*".equals(expr.operator())) {
+            if (!right.isReference()) {
+                diagnostics.addError("Unary * requires reference operand");
+                return TypeId.UNKNOWN;
+            }
+            return right.referenceInner();
+        }
         if ("!".equals(expr.operator())) {
             if (right == TypeId.BOOL) {
                 return TypeId.BOOL;
@@ -869,6 +972,10 @@ public final class TypeChecker implements TypeCheckerStrategy {
     }
 
     private TypeId resolveTypeName(String name, StructRegistry structs, EnumRegistry enums) {
+        TypeId referenceType = parseReferenceType(name, structs, enums);
+        if (referenceType != null) {
+            return referenceType;
+        }
         TypeId genericType = parseGenericType(name, structs, enums);
         if (genericType != null) {
             return genericType;
@@ -904,6 +1011,15 @@ public final class TypeChecker implements TypeCheckerStrategy {
         if (expected == TypeId.INFER || actual == TypeId.INFER) {
             return true;
         }
+        if (expected.isReference() && actual.isReference()) {
+            if (!isAssignable(expected.referenceInner(), actual.referenceInner())) {
+                return false;
+            }
+            if (expected.referenceMutable()) {
+                return actual.referenceMutable();
+            }
+            return true;
+        }
         if (expected == TypeId.ANY) {
             return actual != TypeId.VOID && actual != TypeId.UNKNOWN;
         }
@@ -915,6 +1031,29 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 && isAssignable(expected.resultErr(), actual.resultErr());
         }
         return expected.equals(actual);
+    }
+
+    private TypeId parseReferenceType(String name, StructRegistry structs, EnumRegistry enums) {
+        String trimmed = name.trim();
+        if (!trimmed.startsWith("&")) {
+            return null;
+        }
+        boolean mutable = false;
+        String innerText;
+        if (trimmed.startsWith("&mut")) {
+            mutable = true;
+            innerText = trimmed.substring("&mut".length()).trim();
+        } else {
+            innerText = trimmed.substring(1).trim();
+        }
+        if (innerText.isEmpty()) {
+            return TypeId.UNKNOWN;
+        }
+        TypeId innerType = resolveTypeName(innerText, structs, enums);
+        if (innerType == TypeId.UNKNOWN || innerType == TypeId.VOID) {
+            return TypeId.UNKNOWN;
+        }
+        return TypeId.reference(innerType, mutable);
     }
 
     private TypeId parseGenericType(String name, StructRegistry structs, EnumRegistry enums) {

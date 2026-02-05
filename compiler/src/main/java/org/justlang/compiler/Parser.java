@@ -245,6 +245,15 @@ public final class Parser implements ParserStrategy {
             AstExpr right = parseUnary();
             return new AstUnaryExpr("-", right);
         }
+        if (matchSymbol("&")) {
+            boolean mutable = matchKeyword("mut");
+            AstExpr right = parseUnary();
+            return new AstUnaryExpr(mutable ? "&mut" : "&", right);
+        }
+        if (matchSymbol("*")) {
+            AstExpr right = parseUnary();
+            return new AstUnaryExpr("*", right);
+        }
         AstExpr expr = parsePrimary();
         while (matchSymbol(".")) {
             Token field = expect(Token.TokenKind.IDENT, "Expected field name after '.'");
@@ -625,6 +634,11 @@ public final class Parser implements ParserStrategy {
     }
 
     private String parseTypeName() {
+        if (matchSymbol("&")) {
+            boolean mutable = matchKeyword("mut");
+            String inner = parseTypeName();
+            return mutable ? "&mut " + inner : "&" + inner;
+        }
         if (check(Token.TokenKind.IDENT)) {
             List<String> path = parsePath();
             String base = String.join("::", path);

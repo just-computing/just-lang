@@ -5,36 +5,42 @@ public final class TypeId {
     private final String name;
     private final TypeId first;
     private final TypeId second;
+    private final boolean mutableReference;
 
-    public static final TypeId STRING = new TypeId(Kind.STRING, null, null, null);
-    public static final TypeId INT = new TypeId(Kind.INT, null, null, null);
-    public static final TypeId BOOL = new TypeId(Kind.BOOL, null, null, null);
-    public static final TypeId ANY = new TypeId(Kind.ANY, null, null, null);
-    public static final TypeId INFER = new TypeId(Kind.INFER, null, null, null);
-    public static final TypeId VOID = new TypeId(Kind.VOID, null, null, null);
-    public static final TypeId UNKNOWN = new TypeId(Kind.UNKNOWN, null, null, null);
+    public static final TypeId STRING = new TypeId(Kind.STRING, null, null, null, false);
+    public static final TypeId INT = new TypeId(Kind.INT, null, null, null, false);
+    public static final TypeId BOOL = new TypeId(Kind.BOOL, null, null, null, false);
+    public static final TypeId ANY = new TypeId(Kind.ANY, null, null, null, false);
+    public static final TypeId INFER = new TypeId(Kind.INFER, null, null, null, false);
+    public static final TypeId VOID = new TypeId(Kind.VOID, null, null, null, false);
+    public static final TypeId UNKNOWN = new TypeId(Kind.UNKNOWN, null, null, null, false);
 
-    private TypeId(Kind kind, String name, TypeId first, TypeId second) {
+    private TypeId(Kind kind, String name, TypeId first, TypeId second, boolean mutableReference) {
         this.kind = kind;
         this.name = name;
         this.first = first;
         this.second = second;
+        this.mutableReference = mutableReference;
     }
 
     public static TypeId struct(String name) {
-        return new TypeId(Kind.STRUCT, name, null, null);
+        return new TypeId(Kind.STRUCT, name, null, null, false);
     }
 
     public static TypeId enumType(String name) {
-        return new TypeId(Kind.ENUM, name, null, null);
+        return new TypeId(Kind.ENUM, name, null, null, false);
     }
 
     public static TypeId option(TypeId inner) {
-        return new TypeId(Kind.OPTION, "Option", inner, null);
+        return new TypeId(Kind.OPTION, "Option", inner, null, false);
     }
 
     public static TypeId result(TypeId ok, TypeId err) {
-        return new TypeId(Kind.RESULT, "Result", ok, err);
+        return new TypeId(Kind.RESULT, "Result", ok, err, false);
+    }
+
+    public static TypeId reference(TypeId inner, boolean mutable) {
+        return new TypeId(Kind.REF, null, inner, null, mutable);
     }
 
     public static TypeId fromTypeName(String name) {
@@ -62,6 +68,18 @@ public final class TypeId {
 
     public boolean isEnumLike() {
         return isEnum();
+    }
+
+    public boolean isReference() {
+        return kind == Kind.REF;
+    }
+
+    public TypeId referenceInner() {
+        return kind == Kind.REF ? first : null;
+    }
+
+    public boolean referenceMutable() {
+        return kind == Kind.REF && mutableReference;
     }
 
     public String structName() {
@@ -104,6 +122,7 @@ public final class TypeId {
             case STRUCT, ENUM -> name;
             case OPTION -> "Option<" + first + ">";
             case RESULT -> "Result<" + first + ", " + second + ">";
+            case REF -> "&" + (mutableReference ? "mut " : "") + first;
             case UNKNOWN -> "Unknown";
         };
     }
@@ -119,12 +138,13 @@ public final class TypeId {
         return this.kind == that.kind
             && java.util.Objects.equals(this.name, that.name)
             && java.util.Objects.equals(this.first, that.first)
-            && java.util.Objects.equals(this.second, that.second);
+            && java.util.Objects.equals(this.second, that.second)
+            && this.mutableReference == that.mutableReference;
     }
 
     @Override
     public int hashCode() {
-        return java.util.Objects.hash(kind, name, first, second);
+        return java.util.Objects.hash(kind, name, first, second, mutableReference);
     }
 
     private enum Kind {
@@ -138,6 +158,7 @@ public final class TypeId {
         ENUM,
         OPTION,
         RESULT,
+        REF,
         UNKNOWN
     }
 }

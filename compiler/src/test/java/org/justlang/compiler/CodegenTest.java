@@ -109,4 +109,23 @@ public class CodegenTest {
         assertTrue(main.containsInvoke(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(I)V"));
         assertTrue(main.containsOpcodeSequence(Opcodes.GETSTATIC, Opcodes.LDC, Opcodes.INVOKEVIRTUAL));
     }
+
+    @Test
+    void runsBorrowAndDerefProgram() throws Exception {
+        CodegenTestKit.Compilation compilation = CodegenTestKit.compile("""
+            fn read(x: &i32) -> i32 {
+                return *x;
+            }
+
+            fn main() {
+                let value = 5;
+                let r = &value;
+                std::print(read(r));
+                std::print(*r);
+                return;
+            }
+            """);
+
+        assertEquals("5\n5", compilation.runMainInMemory());
+    }
 }

@@ -1087,6 +1087,11 @@ public final class Codegen implements CodegenStrategy {
     }
 
     private ExprValue emitUnary(MethodVisitor mv, AstUnaryExpr unaryExpr, LocalState locals) {
+        if ("&".equals(unaryExpr.operator()) || "&mut".equals(unaryExpr.operator()) || "*".equals(unaryExpr.operator())) {
+            // `&`, `&mut`, and `*` only affect compile-time borrow typing in this backend.
+            // At runtime we keep the same JVM value and emit no additional instructions.
+            return emitExpr(mv, unaryExpr.expr(), locals);
+        }
         ExprValue right = emitExpr(mv, unaryExpr.expr(), locals);
         if ("!".equals(unaryExpr.operator())) {
             mv.visitInsn(Opcodes.ICONST_1);
@@ -1506,6 +1511,10 @@ public final class Codegen implements CodegenStrategy {
     }
 
     private TypeId resolveTypeName(String name) {
+        TypeId reference = parseReferenceType(name);
+        if (reference != null) {
+            return reference;
+        }
         TypeId generic = parseGenericType(name);
         if (generic != null) {
             return generic;
@@ -1524,6 +1533,10 @@ public final class Codegen implements CodegenStrategy {
     }
 
     private TypeId resolveTypeName(String name, Set<String> knownStructs, Set<String> knownEnums) {
+        TypeId reference = parseReferenceType(name, knownStructs, knownEnums);
+        if (reference != null) {
+            return reference;
+        }
         TypeId generic = parseGenericType(name, knownStructs, knownEnums);
         if (generic != null) {
             return generic;
@@ -1539,6 +1552,47 @@ public final class Codegen implements CodegenStrategy {
             return TypeId.enumType(name);
         }
         return TypeId.UNKNOWN;
+    }
+
+    private TypeId parseReferenceType(String name) {
+        ParsedReferenceType parsedReference = parseReferenceSyntax(name);
+        if (parsedReference == null) {
+            return null;
+        }
+        if (parsedReference.innerTypeText().isEmpty()) {
+            return TypeId.UNKNOWN;
+        }
+        TypeId innerType = resolveTypeName(parsedReference.innerTypeText());
+        if (innerType == TypeId.UNKNOWN || innerType == TypeId.VOID) {
+            return TypeId.UNKNOWN;
+        }
+        return TypeId.reference(innerType, parsedReference.mutable());
+    }
+
+    private TypeId parseReferenceType(String name, Set<String> knownStructs, Set<String> knownEnums) {
+        ParsedReferenceType parsedReference = parseReferenceSyntax(name);
+        if (parsedReference == null) {
+            return null;
+        }
+        if (parsedReference.innerTypeText().isEmpty()) {
+            return TypeId.UNKNOWN;
+        }
+        TypeId innerType = resolveTypeName(parsedReference.innerTypeText(), knownStructs, knownEnums);
+        if (innerType == TypeId.UNKNOWN || innerType == TypeId.VOID) {
+            return TypeId.UNKNOWN;
+        }
+        return TypeId.reference(innerType, parsedReference.mutable());
+    }
+
+    private ParsedReferenceType parseReferenceSyntax(String typeName) {
+        String trimmed = typeName.trim();
+        if (!trimmed.startsWith("&")) {
+            return null;
+        }
+        if (trimmed.startsWith("&mut")) {
+            return new ParsedReferenceType(true, trimmed.substring("&mut".length()).trim());
+        }
+        return new ParsedReferenceType(false, trimmed.substring(1).trim());
     }
 
     private TypeId parseGenericType(String name) {
@@ -1615,18 +1669,23 @@ public final class Codegen implements CodegenStrategy {
                 throw new IllegalStateException("Parameter type cannot be void");
             }
             ValueKind paramKind = toValueKind(paramType);
-            String paramStruct = paramType.isStruct() ? paramType.structName() : paramType.isEnum() ? paramType.enumName() : null;
+            TypeId erasedParamType = runtimeType(paramType);
+            String paramStruct = erasedParamType.isStruct() ? erasedParamType.structName() : erasedParamType.isEnum() ? erasedParamType.enumName() : null;
             String paramDesc = descriptorFor(paramType);
             params.add(new ParamInfo(param.name(), paramKind, paramStruct, paramDesc));
             descriptor.append(paramDesc);
         }
         descriptor.append(')').append(descriptorFor(returnType));
         ValueKind kind = toValueKind(returnType);
-        String structName = returnType.isStruct() ? returnType.structName() : returnType.isEnum() ? returnType.enumName() : null;
+        TypeId erasedReturnType = runtimeType(returnType);
+        String structName = erasedReturnType.isStruct() ? erasedReturnType.structName() : erasedReturnType.isEnum() ? erasedReturnType.enumName() : null;
         return new FunctionInfo(fn.name(), kind, structName, descriptor.toString(), params);
     }
 
     private ValueKind toValueKind(TypeId type) {
+        if (type.isReference()) {
+            return toValueKind(type.referenceInner());
+        }
         if (type == TypeId.INT) {
             return ValueKind.INT;
         }
@@ -1652,6 +1711,9 @@ public final class Codegen implements CodegenStrategy {
     }
 
     private String descriptorFor(TypeId type) {
+        if (type.isReference()) {
+            return descriptorFor(type.referenceInner());
+        }
         if (type == TypeId.INT) {
             return "I";
         }
@@ -1675,6 +1737,16 @@ public final class Codegen implements CodegenStrategy {
         }
         throw new IllegalStateException("Unsupported type: " + type);
     }
+
+    private TypeId runtimeType(TypeId type) {
+        TypeId current = type;
+        while (current.isReference()) {
+            current = current.referenceInner();
+        }
+        return current;
+    }
+
+    private record ParsedReferenceType(boolean mutable, String innerTypeText) {}
 
     private enum ValueKind {
         STRING,
