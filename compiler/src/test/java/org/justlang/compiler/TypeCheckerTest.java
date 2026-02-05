@@ -1803,6 +1803,70 @@ public class TypeCheckerTest {
     }
 
     @Test
+    void moveInOneIfBranchStillMarksValueAsMovedAfterIf() {
+        TypeResult result = typeCheck("""
+            struct Item { value: i32 }
+
+            fn main() {
+                let item = Item { value: 1 };
+                if true {
+                    let moved = item;
+                    std::print(moved.value);
+                } else {
+                    std::print(0);
+                }
+                std::print(item.value);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Use of moved value: item")));
+    }
+
+    @Test
+    void movedValueReinitializedInAllIfBranchesCanBeUsed() {
+        TypeResult result = typeCheck("""
+            struct Item { value: i32 }
+
+            fn main() {
+                let mut item = Item { value: 1 };
+                let moved = item;
+                std::print(moved.value);
+                if true {
+                    item = Item { value: 2 };
+                } else {
+                    item = Item { value: 3 };
+                }
+                std::print(item.value);
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void moveInIfWithoutElseMarksValueAsMoved() {
+        TypeResult result = typeCheck("""
+            struct Item { value: i32 }
+
+            fn main() {
+                let item = Item { value: 1 };
+                if true {
+                    let moved = item;
+                    std::print(moved.value);
+                }
+                std::print(item.value);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Use of moved value: item")));
+    }
+
+    @Test
     void assignmentCannotMoveBorrowedValue() {
         TypeResult result = typeCheck("""
             struct Item { value: i32 }

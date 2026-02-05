@@ -275,13 +275,18 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     diagnostics.addError("if condition must be bool");
                     success = false;
                 }
-                if (!checkBlock(ifStmt.thenBranch(), locals.fork(), structs, enums, functions, expectedReturn, diagnostics)) {
+                TypeEnvironment thenLocals = locals.fork();
+                if (!checkBlock(ifStmt.thenBranch(), thenLocals, structs, enums, functions, expectedReturn, diagnostics)) {
                     success = false;
                 }
                 if (ifStmt.elseBranch() != null) {
-                    if (!checkBlock(ifStmt.elseBranch(), locals.fork(), structs, enums, functions, expectedReturn, diagnostics)) {
+                    TypeEnvironment elseLocals = locals.fork();
+                    if (!checkBlock(ifStmt.elseBranch(), elseLocals, structs, enums, functions, expectedReturn, diagnostics)) {
                         success = false;
                     }
+                    locals.joinMovedFrom(thenLocals, elseLocals);
+                } else {
+                    locals.mergeMovedFrom(thenLocals);
                 }
                 continue;
             }
@@ -297,11 +302,13 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     diagnostics.addError("while condition must be bool");
                     success = false;
                 }
+                TypeEnvironment loopLocals = locals.fork();
                 loopStack.push(new LoopContext(whileStmt.label(), false));
-                if (!checkBlock(whileStmt.body(), locals.fork(), structs, enums, functions, expectedReturn, diagnostics)) {
+                if (!checkBlock(whileStmt.body(), loopLocals, structs, enums, functions, expectedReturn, diagnostics)) {
                     success = false;
                 }
                 loopStack.pop();
+                locals.mergeMovedFrom(loopLocals);
                 continue;
             }
             if (stmt instanceof AstWhileLetStmt whileLetStmt) {
@@ -324,14 +331,17 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     success = false;
                 }
                 loopStack.pop();
+                locals.mergeMovedFrom(loopLocals);
                 continue;
             }
             if (stmt instanceof AstLoopStmt loopStmt) {
+                TypeEnvironment loopLocals = locals.fork();
                 loopStack.push(new LoopContext(loopStmt.label(), false));
-                if (!checkBlock(loopStmt.body(), locals.fork(), structs, enums, functions, expectedReturn, diagnostics)) {
+                if (!checkBlock(loopStmt.body(), loopLocals, structs, enums, functions, expectedReturn, diagnostics)) {
                     success = false;
                 }
                 loopStack.pop();
+                locals.mergeMovedFrom(loopLocals);
                 continue;
             }
             if (stmt instanceof AstBreakStmt breakStmt) {
@@ -483,9 +493,13 @@ public final class TypeChecker implements TypeCheckerStrategy {
         }
         boolean success = checkBlock(ifLetStmt.thenBranch(), thenLocals, structs, enums, functions, expectedReturn, diagnostics);
         if (ifLetStmt.elseBranch() != null) {
-            if (!checkBlock(ifLetStmt.elseBranch(), locals.fork(), structs, enums, functions, expectedReturn, diagnostics)) {
+            TypeEnvironment elseLocals = locals.fork();
+            if (!checkBlock(ifLetStmt.elseBranch(), elseLocals, structs, enums, functions, expectedReturn, diagnostics)) {
                 success = false;
             }
+            locals.joinMovedFrom(thenLocals, elseLocals);
+        } else {
+            locals.mergeMovedFrom(thenLocals);
         }
         return success;
     }
@@ -516,6 +530,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
         loopStack.push(new LoopContext(whileLetStmt.label(), false));
         boolean success = checkBlock(whileLetStmt.body(), bodyLocals, structs, enums, functions, expectedReturn, diagnostics);
         loopStack.pop();
+        locals.mergeMovedFrom(bodyLocals);
         return success;
     }
 
@@ -609,8 +624,11 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 diagnostics.addError("if expression condition must be bool");
                 return TypeId.UNKNOWN;
             }
-            TypeId thenType = inferExpr(ifExpr.thenExpr(), locals, structs, enums, functions, diagnostics);
-            TypeId elseType = inferExpr(ifExpr.elseExpr(), locals, structs, enums, functions, diagnostics);
+            TypeEnvironment thenLocals = locals.fork();
+            TypeEnvironment elseLocals = locals.fork();
+            TypeId thenType = inferExpr(ifExpr.thenExpr(), thenLocals, structs, enums, functions, diagnostics);
+            TypeId elseType = inferExpr(ifExpr.elseExpr(), elseLocals, structs, enums, functions, diagnostics);
+            locals.joinMovedFrom(thenLocals, elseLocals);
             if (thenType == TypeId.UNKNOWN || elseType == TypeId.UNKNOWN) {
                 return TypeId.UNKNOWN;
             }
@@ -634,16 +652,19 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 diagnostics.addError("block expression cannot be void");
                 return TypeId.UNKNOWN;
             }
+            locals.adoptMovedFrom(blockLocals);
             return valueType;
         }
         if (expr instanceof AstLoopExpr loopExpr) {
             LoopContext context = new LoopContext(null, true);
+            TypeEnvironment loopLocals = locals.fork();
             loopStack.push(context);
-            if (!checkBlock(loopExpr.body(), locals.fork(), structs, enums, functions, currentReturnType, diagnostics)) {
+            if (!checkBlock(loopExpr.body(), loopLocals, structs, enums, functions, currentReturnType, diagnostics)) {
                 loopStack.pop();
                 return TypeId.UNKNOWN;
             }
             loopStack.pop();
+            locals.mergeMovedFrom(loopLocals);
             if (context.breakType == null) {
                 diagnostics.addError("loop expression requires break with value");
                 return TypeId.UNKNOWN;
@@ -679,6 +700,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 coveredVariants = new HashSet<>();
             }
             TypeId armType = null;
+            List<TypeEnvironment> armLocalsList = new ArrayList<>();
             List<AstMatchArm> arms = matchExpr.arms();
             for (int i = 0; i < arms.size(); i++) {
                 AstMatchArm arm = arms.get(i);
@@ -708,6 +730,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     }
                 }
                 TypeEnvironment armLocals = locals.fork();
+                armLocalsList.add(armLocals);
                 if (AstMatchPattern.Kind.ENUM.equals(pattern.kind())) {
                     if (!bindEnumPattern(pattern, targetType, armLocals, structs, enums, diagnostics)) {
                         return TypeId.UNKNOWN;
@@ -735,6 +758,11 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     return TypeId.UNKNOWN;
                 }
             }
+            boolean enumExhaustive = targetEnum != null
+                && coveredVariants != null
+                && coveredVariants.size() == targetEnum.variants().size();
+            boolean exhaustive = hasWildcard || enumExhaustive;
+            locals.joinMovedFromAll(armLocalsList, !exhaustive);
             // Only warn when no wildcard is present; for enums, report the specific missing variants.
             if (!hasWildcard) {
                 if (targetEnum != null) {
