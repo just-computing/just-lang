@@ -40,6 +40,13 @@ Parses Just source, performs name/type/borrow analysis, lowers to IR, monomorphi
 - `.jar` file with generated JVM classes
 - `Diagnostics` for errors/warnings
 
+## Testing
+
+- E2E compiler fixtures live in `compiler/src/test/resources/fixtures`.
+- The fixture runner is `compiler/src/test/java/org/justlang/compiler/CompilerFixtureTest.java`.
+- Fixture execution logic is in `compiler/src/test/java/org/justlang/compiler/CompilerFixtureKit.java`.
+- Full setup and usage are documented in `docs/COMPILER_TESTING.md`.
+
 ## Current Language Surface (Prototype)
 
 - Functions with typed parameters and return types (`fn add(a: i32, b: i32) -> i32`).

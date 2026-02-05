@@ -16,6 +16,7 @@ java {
 dependencies {
     implementation(libs.asm)
     testImplementation(libs.junit.jupiter)
+    testImplementation(libs.asm.util)
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

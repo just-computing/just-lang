@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
+import org.objectweb.asm.Opcodes;
 
 public class CodegenTest {
     @Test
@@ -53,6 +54,12 @@ public class CodegenTest {
             }
             """.formatted(someValue));
 
+        CodegenTestKit.MethodModel unwrapOrZero = compilation.inspect("Main").method("unwrap_or_zero", "(LOption;)I");
+        assertTrue(unwrapOrZero.containsFieldAccess(Opcodes.GETFIELD, "Option", "tag", "I"));
+        assertTrue(unwrapOrZero.containsFieldAccess(Opcodes.GETFIELD, "Option", "payload", "Ljava/lang/Object;"));
+        assertTrue(unwrapOrZero.containsTypeOp(Opcodes.CHECKCAST, "java/lang/Integer"));
+        assertTrue(unwrapOrZero.containsInvoke(Opcodes.INVOKEVIRTUAL, "java/lang/Integer", "intValue", "()I"));
+
         assertEquals(Integer.toString(someValue), compilation.runMainInMemory());
     }
 
@@ -76,6 +83,30 @@ public class CodegenTest {
             }
             """);
 
+        CodegenTestKit.ClassModel option = compilation.inspect("Option");
+        CodegenTestKit.MethodModel optionToString = option.method("toString", "()Ljava/lang/String;");
+        assertTrue(optionToString.containsLookupSwitch());
+
+        CodegenTestKit.MethodModel valueOrDefault = compilation.inspect("Main").method("value_or_default", "(LResult;)I");
+        assertTrue(valueOrDefault.containsFieldAccess(Opcodes.GETFIELD, "Result", "tag", "I"));
+        assertTrue(valueOrDefault.containsFieldAccess(Opcodes.GETFIELD, "Result", "payload", "Ljava/lang/Object;"));
+
         assertEquals("9\n0", compilation.runMainViaJar());
+    }
+
+    @Test
+    void emitsPrintInstructionSequence() {
+        CodegenTestKit.Compilation compilation = CodegenTestKit.compile("""
+            fn main() {
+                std::print(42);
+                return;
+            }
+            """);
+
+        CodegenTestKit.MethodModel main = compilation.inspect("Main").method("main", "([Ljava/lang/String;)V");
+        assertTrue(main.containsFieldAccess(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;"));
+        assertTrue(main.containsLdc(42));
+        assertTrue(main.containsInvoke(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(I)V"));
+        assertTrue(main.containsOpcodeSequence(Opcodes.GETSTATIC, Opcodes.LDC, Opcodes.INVOKEVIRTUAL));
     }
 }
