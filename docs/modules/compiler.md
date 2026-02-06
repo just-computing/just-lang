@@ -15,7 +15,8 @@ Parses Just source, performs name/type/borrow analysis, lowers to IR, monomorphi
 | `Parser` | Builds AST from tokens. | `parse(List<Token>): AstModule` |
 | `NameResolver` | Resolves symbols to bindings. | `resolve(AstModule): HirModule` |
 | `TypeChecker` | Infers and checks types. | `typeCheck(HirModule): TypedModule` |
-| `BorrowAnalyzer` | High-level borrow API used by `TypeChecker` (`validateMove`, `validateAssignment`, `validateBorrow`). | `validateMove(String): BorrowValidation` |
+| `BorrowFlowAnalyzer` | Applies borrow rules over lexical control flow (bind/borrow/move/assign). | `recordPersistentBorrow(...): boolean` |
+| `BorrowAnalyzer` | High-level borrow API used by `BorrowFlowAnalyzer` (`validateMove`, `validateAssignment`, `validateBorrow`). | `validateMove(String): BorrowValidation` |
 | `LexicalBorrowAnalyzer` | Default borrow analyzer implementation (v1), delegates state to `BorrowTracker`. | `recordBorrow(...): void` |
 | `BorrowTracker` | Low-level lexical counters/scopes abstraction. | `addBindingBorrow(...): void` |
 | `BorrowChecker` | Enforces ownership/borrowing rules. | `check(TypedModule): BorrowResult` |
@@ -32,7 +33,7 @@ Parses Just source, performs name/type/borrow analysis, lowers to IR, monomorphi
 3. `Parser` builds AST (`AstModule` and items).
 4. `NameResolver` produces HIR with resolved bindings.
 5. `TypeChecker` infers/checks types and produces `TypedModule`.
-6. `TypeChecker` uses `BorrowAnalyzer` high-level checks, while `LexicalBorrowAnalyzer` delegates internals to `BorrowTracker`.
+6. `TypeChecker` uses `BorrowFlowAnalyzer`, which delegates policy to `BorrowAnalyzer` and state to `BorrowTracker`.
 7. `BorrowChecker` validates ownership and lifetimes.
 8. `MirBuilder` lowers to MIR.
 9. `Monomorphizer` specializes generics.

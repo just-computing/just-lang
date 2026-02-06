@@ -7,14 +7,12 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import org.justlang.compiler.borrow.BorrowAnalyzer;
-import org.justlang.compiler.borrow.BorrowValidation;
-import org.justlang.compiler.borrow.LexicalBorrowAnalyzer;
+import org.justlang.compiler.borrow.BorrowFlowAnalyzer;
 
 public final class TypeChecker implements TypeCheckerStrategy {
     private TypeId currentReturnType = TypeId.VOID;
     private final Deque<LoopContext> loopStack = new ArrayDeque<>();
-    private BorrowAnalyzer currentBorrows;
+    private BorrowFlowAnalyzer borrowFlow;
 
     public TypedModule typeCheck(HirModule module) {
         throw new UnsupportedOperationException("Type checker not implemented yet");
@@ -125,14 +123,14 @@ public final class TypeChecker implements TypeCheckerStrategy {
         }
 
         TypeId previousReturn = currentReturnType;
-        BorrowAnalyzer previousBorrows = currentBorrows;
+        BorrowFlowAnalyzer previousBorrowFlow = borrowFlow;
         currentReturnType = expectedReturn;
-        currentBorrows = new LexicalBorrowAnalyzer();
+        borrowFlow = BorrowFlowAnalyzer.lexical();
         if (!checkBlock(fn.body(), locals, structs, enums, functions, expectedReturn, diagnostics)) {
             success = false;
         }
         currentReturnType = previousReturn;
-        currentBorrows = previousBorrows;
+        borrowFlow = previousBorrowFlow;
 
         if (expectedReturn != TypeId.VOID && !endsWithReturnValue(fn.body())) {
             diagnostics.addError("Non-void functions must return on all paths");
@@ -152,8 +150,8 @@ public final class TypeChecker implements TypeCheckerStrategy {
         TypeEnvironment diagnostics
     ) {
         boolean success = true;
-        if (currentBorrows != null) {
-            currentBorrows.enterScope();
+        if (borrowFlow != null) {
+            borrowFlow.enterScope();
         }
         try {
             for (AstStmt stmt : statements) {
@@ -195,8 +193,8 @@ public final class TypeChecker implements TypeCheckerStrategy {
                         continue;
                     }
                     TypeId finalType = declaredType != null ? declaredType : exprType;
-                    if (currentBorrows != null) {
-                        currentBorrows.releaseBinding(letStmt.name());
+                    if (borrowFlow != null) {
+                        borrowFlow.onBindingWrite(letStmt.name());
                     }
                     locals.define(letStmt.name(), finalType, letStmt.mutable());
                     if (!registerPersistentBorrow(letStmt.name(), letStmt.initializer(), locals, diagnostics)) {
@@ -222,9 +220,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                         success = false;
                         continue;
                     }
-                    if (!validateBorrowOperation(assignStmt.name(), currentBorrows == null
-                        ? BorrowValidation.ok()
-                        : currentBorrows.validateAssignment(assignStmt.name()), diagnostics)) {
+                    if (borrowFlow != null && !borrowFlow.requireAssignable(assignStmt.name(), diagnostics::addError)) {
                         success = false;
                         continue;
                     }
@@ -252,8 +248,8 @@ public final class TypeChecker implements TypeCheckerStrategy {
                         }
                     }
                     if (success && "=".equals(op) && binding.type().isReference()) {
-                        if (currentBorrows != null) {
-                            currentBorrows.releaseBinding(assignStmt.name());
+                        if (borrowFlow != null) {
+                            borrowFlow.onBindingWrite(assignStmt.name());
                         }
                         if (!registerPersistentBorrow(assignStmt.name(), assignStmt.value(), locals, diagnostics)) {
                             success = false;
@@ -382,8 +378,8 @@ public final class TypeChecker implements TypeCheckerStrategy {
             success = false;
         }
         } finally {
-            if (currentBorrows != null) {
-                currentBorrows.exitScope();
+            if (borrowFlow != null) {
+                borrowFlow.exitScope();
             }
         }
         return success;
@@ -410,7 +406,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
     }
 
     private boolean registerPersistentBorrow(String bindingName, AstExpr initializer, TypeEnvironment locals, TypeEnvironment diagnostics) {
-        if (currentBorrows == null) {
+        if (borrowFlow == null) {
             return true;
         }
         if (!(initializer instanceof AstUnaryExpr unaryExpr)) {
@@ -429,31 +425,11 @@ public final class TypeChecker implements TypeCheckerStrategy {
             return false;
         }
         boolean mutableBorrow = "&mut".equals(unaryExpr.operator());
-        if (!validateBorrowOperation(
-            identExpr.name(),
-            currentBorrows.validateBorrow(identExpr.name(), mutableBorrow),
-            diagnostics
-        )) {
-            return false;
-        }
-        currentBorrows.recordBorrow(bindingName, identExpr.name(), mutableBorrow);
-        return true;
+        return borrowFlow.recordPersistentBorrow(bindingName, identExpr.name(), mutableBorrow, diagnostics::addError);
     }
 
     private boolean isBorrowOperator(String operator) {
         return "&".equals(operator) || "&mut".equals(operator);
-    }
-
-    private boolean validateBorrowOperation(String target, BorrowValidation validation, TypeEnvironment diagnostics) {
-        if (validation.allowed()) {
-            return true;
-        }
-        if (validation.message() != null) {
-            diagnostics.addError(validation.message());
-        } else {
-            diagnostics.addError("Borrow check failed for '" + target + "'");
-        }
-        return false;
     }
 
     private boolean consumeMoveCandidate(AstExpr expr, TypeId exprType, TypeEnvironment locals, TypeEnvironment diagnostics) {
@@ -472,9 +448,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
             diagnostics.addError("Use of moved value: " + identExpr.name());
             return false;
         }
-        if (!validateBorrowOperation(identExpr.name(), currentBorrows == null
-            ? BorrowValidation.ok()
-            : currentBorrows.validateMove(identExpr.name()), diagnostics)) {
+        if (borrowFlow != null && !borrowFlow.requireMovable(identExpr.name(), diagnostics::addError)) {
             return false;
         }
         locals.markMoved(identExpr.name());
@@ -1036,9 +1010,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 diagnostics.addError("Cannot take mutable borrow of immutable variable: " + identExpr.name());
                 return TypeId.UNKNOWN;
             }
-            if (!validateBorrowOperation(identExpr.name(), currentBorrows == null
-                ? BorrowValidation.ok()
-                : currentBorrows.validateBorrow(identExpr.name(), mutableBorrow), diagnostics)) {
+            if (borrowFlow != null && !borrowFlow.requireBorrowable(identExpr.name(), mutableBorrow, diagnostics::addError)) {
                 return TypeId.UNKNOWN;
             }
             return TypeId.reference(binding.type(), mutableBorrow);
