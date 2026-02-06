@@ -7,13 +7,14 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import org.justlang.compiler.borrow.BorrowTracker;
-import org.justlang.compiler.borrow.LexicalBorrowTracker;
+import org.justlang.compiler.borrow.BorrowAnalyzer;
+import org.justlang.compiler.borrow.BorrowValidation;
+import org.justlang.compiler.borrow.LexicalBorrowAnalyzer;
 
 public final class TypeChecker implements TypeCheckerStrategy {
     private TypeId currentReturnType = TypeId.VOID;
     private final Deque<LoopContext> loopStack = new ArrayDeque<>();
-    private BorrowTracker currentBorrows;
+    private BorrowAnalyzer currentBorrows;
 
     public TypedModule typeCheck(HirModule module) {
         throw new UnsupportedOperationException("Type checker not implemented yet");
@@ -124,9 +125,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
         }
 
         TypeId previousReturn = currentReturnType;
-        BorrowTracker previousBorrows = currentBorrows;
+        BorrowAnalyzer previousBorrows = currentBorrows;
         currentReturnType = expectedReturn;
-        currentBorrows = new LexicalBorrowTracker();
+        currentBorrows = new LexicalBorrowAnalyzer();
         if (!checkBlock(fn.body(), locals, structs, enums, functions, expectedReturn, diagnostics)) {
             success = false;
         }
@@ -195,7 +196,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     }
                     TypeId finalType = declaredType != null ? declaredType : exprType;
                     if (currentBorrows != null) {
-                        currentBorrows.releaseBindingLoan(letStmt.name());
+                        currentBorrows.releaseBinding(letStmt.name());
                     }
                     locals.define(letStmt.name(), finalType, letStmt.mutable());
                     if (!registerPersistentBorrow(letStmt.name(), letStmt.initializer(), locals, diagnostics)) {
@@ -221,8 +222,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
                         success = false;
                         continue;
                     }
-                    if (currentBorrows != null && currentBorrows.hasActiveBorrow(assignStmt.name())) {
-                        diagnostics.addError("Cannot assign to '" + assignStmt.name() + "' while it is borrowed");
+                    if (!validateBorrowOperation(assignStmt.name(), currentBorrows == null
+                        ? BorrowValidation.ok()
+                        : currentBorrows.validateAssignment(assignStmt.name()), diagnostics)) {
                         success = false;
                         continue;
                     }
@@ -251,7 +253,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     }
                     if (success && "=".equals(op) && binding.type().isReference()) {
                         if (currentBorrows != null) {
-                            currentBorrows.releaseBindingLoan(assignStmt.name());
+                            currentBorrows.releaseBinding(assignStmt.name());
                         }
                         if (!registerPersistentBorrow(assignStmt.name(), assignStmt.value(), locals, diagnostics)) {
                             success = false;
@@ -427,17 +429,31 @@ public final class TypeChecker implements TypeCheckerStrategy {
             return false;
         }
         boolean mutableBorrow = "&mut".equals(unaryExpr.operator());
-        String conflict = currentBorrows.borrowConflict(identExpr.name(), mutableBorrow);
-        if (conflict != null) {
-            diagnostics.addError(conflict);
+        if (!validateBorrowOperation(
+            identExpr.name(),
+            currentBorrows.validateBorrow(identExpr.name(), mutableBorrow),
+            diagnostics
+        )) {
             return false;
         }
-        currentBorrows.addBindingBorrow(bindingName, identExpr.name(), mutableBorrow);
+        currentBorrows.recordBorrow(bindingName, identExpr.name(), mutableBorrow);
         return true;
     }
 
     private boolean isBorrowOperator(String operator) {
         return "&".equals(operator) || "&mut".equals(operator);
+    }
+
+    private boolean validateBorrowOperation(String target, BorrowValidation validation, TypeEnvironment diagnostics) {
+        if (validation.allowed()) {
+            return true;
+        }
+        if (validation.message() != null) {
+            diagnostics.addError(validation.message());
+        } else {
+            diagnostics.addError("Borrow check failed for '" + target + "'");
+        }
+        return false;
     }
 
     private boolean consumeMoveCandidate(AstExpr expr, TypeId exprType, TypeEnvironment locals, TypeEnvironment diagnostics) {
@@ -456,8 +472,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
             diagnostics.addError("Use of moved value: " + identExpr.name());
             return false;
         }
-        if (currentBorrows != null && currentBorrows.hasActiveBorrow(identExpr.name())) {
-            diagnostics.addError("Cannot move '" + identExpr.name() + "' while it is borrowed");
+        if (!validateBorrowOperation(identExpr.name(), currentBorrows == null
+            ? BorrowValidation.ok()
+            : currentBorrows.validateMove(identExpr.name()), diagnostics)) {
             return false;
         }
         locals.markMoved(identExpr.name());
@@ -1019,13 +1036,10 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 diagnostics.addError("Cannot take mutable borrow of immutable variable: " + identExpr.name());
                 return TypeId.UNKNOWN;
             }
-            if (currentBorrows != null) {
-                // Reject conflicting borrows immediately so invalid borrow graphs never enter the environment.
-                String conflict = currentBorrows.borrowConflict(identExpr.name(), mutableBorrow);
-                if (conflict != null) {
-                    diagnostics.addError(conflict);
-                    return TypeId.UNKNOWN;
-                }
+            if (!validateBorrowOperation(identExpr.name(), currentBorrows == null
+                ? BorrowValidation.ok()
+                : currentBorrows.validateBorrow(identExpr.name(), mutableBorrow), diagnostics)) {
+                return TypeId.UNKNOWN;
             }
             return TypeId.reference(binding.type(), mutableBorrow);
         }

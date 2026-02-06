@@ -15,6 +15,9 @@ Parses Just source, performs name/type/borrow analysis, lowers to IR, monomorphi
 | `Parser` | Builds AST from tokens. | `parse(List<Token>): AstModule` |
 | `NameResolver` | Resolves symbols to bindings. | `resolve(AstModule): HirModule` |
 | `TypeChecker` | Infers and checks types. | `typeCheck(HirModule): TypedModule` |
+| `BorrowAnalyzer` | High-level borrow API used by `TypeChecker` (`validateMove`, `validateAssignment`, `validateBorrow`). | `validateMove(String): BorrowValidation` |
+| `LexicalBorrowAnalyzer` | Default borrow analyzer implementation (v1), delegates state to `BorrowTracker`. | `recordBorrow(...): void` |
+| `BorrowTracker` | Low-level lexical counters/scopes abstraction. | `addBindingBorrow(...): void` |
 | `BorrowChecker` | Enforces ownership/borrowing rules. | `check(TypedModule): BorrowResult` |
 | `MirBuilder` | Lowers typed HIR to MIR. | `lower(TypedModule): MirModule` |
 | `Monomorphizer` | Specializes generics. | `specialize(MirModule): MirModule` |
@@ -29,11 +32,12 @@ Parses Just source, performs name/type/borrow analysis, lowers to IR, monomorphi
 3. `Parser` builds AST (`AstModule` and items).
 4. `NameResolver` produces HIR with resolved bindings.
 5. `TypeChecker` infers/checks types and produces `TypedModule`.
-6. `BorrowChecker` validates ownership and lifetimes.
-7. `MirBuilder` lowers to MIR.
-8. `Monomorphizer` specializes generics.
-9. `Codegen` emits JVM class files.
-10. `JarEmitter` packages class files into a runnable `.jar`.
+6. `TypeChecker` uses `BorrowAnalyzer` high-level checks, while `LexicalBorrowAnalyzer` delegates internals to `BorrowTracker`.
+7. `BorrowChecker` validates ownership and lifetimes.
+8. `MirBuilder` lowers to MIR.
+9. `Monomorphizer` specializes generics.
+10. `Codegen` emits JVM class files.
+11. `JarEmitter` packages class files into a runnable `.jar`.
 
 ## Outputs
 
