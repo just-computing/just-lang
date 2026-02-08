@@ -13,6 +13,7 @@ java {
 }
 
 application {
+    applicationName = "just"
     mainClass = "org.justlang.cli.JustCli"
 }
 

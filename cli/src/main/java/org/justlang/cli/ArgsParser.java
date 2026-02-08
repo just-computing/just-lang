@@ -27,7 +27,8 @@ public final class ArgsParser {
             return parseFmt(args);
         }
 
-        return HelpCommand.usage("Unknown command: " + command);
+        // Shortcut: `just <file.just|dir> [--out path]` behaves like `just build ...`.
+        return parseBuildShortcut(args);
     }
 
     private Command parseBuild(String[] args) {
@@ -50,6 +51,40 @@ public final class ArgsParser {
             }
 
             return HelpCommand.usage("Unexpected argument: " + arg);
+        }
+
+        if (inputPath == null) {
+            return HelpCommand.usage("Missing input file or directory.");
+        }
+
+        if (outputJar == null) {
+            java.nio.file.Path base = java.nio.file.Files.isDirectory(inputPath)
+                ? inputPath
+                : inputPath.getParent();
+            outputJar = base.resolve("build/just.jar");
+        }
+
+        return new BuildCommand(inputPath, outputJar);
+    }
+
+    private Command parseBuildShortcut(String[] args) {
+        java.nio.file.Path inputPath = null;
+        java.nio.file.Path outputJar = null;
+
+        for (int i = 0; i < args.length; i++) {
+            String arg = args[i];
+            if ("-o".equals(arg) || "--out".equals(arg)) {
+                if (i + 1 >= args.length) {
+                    return HelpCommand.usage("Missing value for " + arg);
+                }
+                outputJar = java.nio.file.Path.of(args[++i]);
+                continue;
+            }
+            if (inputPath == null) {
+                inputPath = PathResolver.resolveInput(arg);
+                continue;
+            }
+            return HelpCommand.usage("Unknown command: " + args[0]);
         }
 
         if (inputPath == null) {
