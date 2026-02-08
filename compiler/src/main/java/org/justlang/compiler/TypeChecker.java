@@ -93,7 +93,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 }
                 continue;
             }
-            if (!(item instanceof AstStruct) && !(item instanceof AstEnum)) {
+            if (!(item instanceof AstStruct) && !(item instanceof AstEnum) && !(item instanceof AstImport)) {
                 diagnostics.addError("Unsupported item: " + item.getClass().getSimpleName());
                 success = false;
             }

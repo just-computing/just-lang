@@ -16,6 +16,7 @@ public final class JargoNewCommand implements Command {
         Path root = Path.of(name).toAbsolutePath().normalize();
         Path srcDir = root.resolve("src");
         Path mainFile = srcDir.resolve("main.just");
+        Path appFile = srcDir.resolve("app.just");
         Path manifest = root.resolve("just.toml");
         Path readme = root.resolve("README.md");
 
@@ -25,10 +26,36 @@ public final class JargoNewCommand implements Command {
                 Files.writeString(manifest, "name = \"" + name + "\"\nmain = \"src/main.just\"\n");
             }
             if (!Files.exists(mainFile)) {
-                Files.writeString(mainFile, "fn main() {\n    std::print(\"hello from " + name + "\");\n}\n");
+                Files.writeString(
+                    mainFile,
+                    "import \"app.just\";\n\n"
+                        + "fn main() {\n"
+                        + "    std::print(app_greeting());\n"
+                        + "    return;\n"
+                        + "}\n"
+                );
+            }
+            if (!Files.exists(appFile)) {
+                Files.writeString(
+                    appFile,
+                    "fn app_greeting() -> String {\n"
+                        + "    return \"hello from " + name + "\";\n"
+                        + "}\n"
+                );
             }
             if (!Files.exists(readme)) {
-                Files.writeString(readme, "# " + name + "\n");
+                Files.writeString(
+                    readme,
+                    "# " + name + "\n\n"
+                        + "## Build\n\n"
+                        + "```bash\n"
+                        + "just jargo build\n"
+                        + "```\n\n"
+                        + "## Run\n\n"
+                        + "```bash\n"
+                        + "just jargo run\n"
+                        + "```\n"
+                );
             }
         } catch (IOException error) {
             System.err.println("Failed to create project: " + error.getMessage());

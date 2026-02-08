@@ -14,14 +14,16 @@ Provides the `just` command-line interface: project discovery, build orchestrati
 | `BuildCommand` | Compile project to `.jar`. | `run(): int` |
 | `RunCommand` | Build and execute `.jar`. | `run(): int` |
 | `CheckCommand` | Type/borrow-check without emitting bytecode. | `run(): int` |
-| `ProjectLoader` | Reads `just.toml` and resolves deps. | `load(Path): ProjectConfig` |
+| `ProjectLoader` | Resolves the input path used for a compile/check operation. | `load(Path): ProjectConfig` |
+| `ProjectManifest` | Reads `just.toml` fields used by `jargo` commands. | `load(Path): ProjectManifest` |
 | `CompilerService` | Invokes `compiler::JustCompiler`. | `build(ProjectConfig): CompileResult` |
 | `JarRunner` | Runs produced `.jar`. | `runJar(Path): int` |
+| `JargoNewCommand` | Creates a multi-file app template (`src/main.just` + `src/app.just`). | `run(): int` |
 
 ## Data Flow
 
 1. `JustCli` parses args via `ArgsParser`.
-2. `ProjectLoader` reads `just.toml` and resolves the module graph.
-3. `CompilerService` invokes the compiler to produce class files and a `.jar`.
-4. `RunCommand` executes the `.jar` when requested.
-
+2. For `jargo` commands, `ProjectManifest` resolves `main` from `just.toml`.
+3. `ProjectLoader` converts the chosen file/directory into `ProjectConfig`.
+4. `CompilerService` invokes the compiler to produce class files and a `.jar`.
+5. `RunCommand`/`JargoRunCommand` executes the generated `.jar` when requested.

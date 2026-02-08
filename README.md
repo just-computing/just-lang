@@ -51,6 +51,18 @@ Type-check only:
 ./cli/build/install/just/bin/just check examples/hello.just
 ```
 
+## Modules and imports
+
+Use explicit file imports at the top level:
+
+```just
+import "app.just";
+import "feature/math.just";
+```
+
+Import paths are resolved relative to the importing source file.
+The compiler loads imports transitively and reports errors for missing files or import cycles.
+
 Project commands:
 
 ```bash
@@ -58,6 +70,12 @@ Project commands:
 ./cli/build/install/just/bin/just jargo build
 ./cli/build/install/just/bin/just jargo run
 ```
+
+`jargo new` scaffolds:
+
+- `src/main.just` as entrypoint
+- `src/app.just` as an imported module
+- `just.toml` with `main = "src/main.just"`
 
 ## Merge sort sample
 

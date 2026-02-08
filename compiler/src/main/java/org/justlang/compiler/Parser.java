@@ -33,7 +33,16 @@ public final class Parser implements ParserStrategy {
         if (matchKeyword("enum")) {
             return parseEnum();
         }
+        if (matchKeyword("import")) {
+            return parseImport();
+        }
         throw error(peek(), "Expected item (e.g., 'fn' or 'struct')");
+    }
+
+    private AstImport parseImport() {
+        Token path = expect(Token.TokenKind.STRING, "Expected string literal import path");
+        expectSymbol(";");
+        return new AstImport(path.lexeme());
     }
 
     private AstFunction parseFunction() {

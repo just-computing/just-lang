@@ -36,7 +36,7 @@ public final class JustCompiler {
                 Project project = new Project(inputPath);
                 sources.addAll(loader.load(project));
             } else {
-                sources.add(loader.loadFile(inputPath));
+                sources.addAll(loader.loadFileGraph(inputPath));
             }
         } catch (RuntimeException error) {
             diagnostics.report(new Diagnostic(error.getMessage(), inputPath));
@@ -55,16 +55,6 @@ public final class JustCompiler {
             try {
                 java.util.List<Token> tokens = lexer.lex(source, diagnostics);
                 AstModule module = parser.parse(source, tokens, diagnostics);
-                TypeResult typeResult = typeChecker.typeCheck(module);
-                for (String warning : typeResult.environment().warnings()) {
-                    diagnostics.report(new Diagnostic("warning: " + warning, source.path()));
-                }
-                if (!typeResult.success()) {
-                    for (String error : typeResult.environment().errors()) {
-                        diagnostics.report(new Diagnostic(error, source.path()));
-                    }
-                    success = false;
-                }
                 items.addAll(module.items());
             } catch (LexException | ParseException error) {
                 success = false;
@@ -78,6 +68,18 @@ public final class JustCompiler {
             return new CompileResult(false, diagnostics.all());
         }
 
+        AstModule mergedModule = new AstModule(items);
+        TypeResult typeResult = typeChecker.typeCheck(mergedModule);
+        for (String warning : typeResult.environment().warnings()) {
+            diagnostics.report(new Diagnostic("warning: " + warning, inputPath));
+        }
+        if (!typeResult.success()) {
+            for (String error : typeResult.environment().errors()) {
+                diagnostics.report(new Diagnostic(error, inputPath));
+            }
+            return new CompileResult(false, diagnostics.all());
+        }
+
         if (!request.emitJar()) {
             diagnostics.report(new Diagnostic(
                 "Checked " + sources.size() + " source file(s).",
@@ -88,7 +90,7 @@ public final class JustCompiler {
 
         java.util.List<ClassFile> classFiles;
         try {
-            classFiles = codegen.emit(new AstModule(items));
+            classFiles = codegen.emit(mergedModule);
         } catch (RuntimeException error) {
             diagnostics.report(new Diagnostic("Codegen error: " + error.getMessage(), inputPath));
             return new CompileResult(false, diagnostics.all());

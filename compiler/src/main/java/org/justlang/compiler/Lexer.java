@@ -22,7 +22,8 @@ public final class Lexer implements LexerStrategy {
         "loop",
         "match",
         "break",
-        "continue"
+        "continue",
+        "import"
     );
 
     @Override
