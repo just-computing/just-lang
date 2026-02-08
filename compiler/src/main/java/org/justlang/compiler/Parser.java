@@ -24,14 +24,32 @@ public final class Parser implements ParserStrategy {
     }
 
     private AstItem parseItem() {
+        if (matchKeyword("pub")) {
+            if (matchKeyword("fn")) {
+                return parseFunction(true);
+            }
+            if (matchKeyword("struct")) {
+                return parseStruct();
+            }
+            if (matchKeyword("enum")) {
+                return parseEnum();
+            }
+            throw error(peek(), "Expected 'fn', 'struct', or 'enum' after 'pub'");
+        }
         if (matchKeyword("fn")) {
-            return parseFunction();
+            return parseFunction(false);
         }
         if (matchKeyword("struct")) {
             return parseStruct();
         }
         if (matchKeyword("enum")) {
             return parseEnum();
+        }
+        if (matchKeyword("mod")) {
+            return parseMod();
+        }
+        if (matchKeyword("use")) {
+            return parseUse();
         }
         if (matchKeyword("import")) {
             return parseImport();
@@ -45,7 +63,7 @@ public final class Parser implements ParserStrategy {
         return new AstImport(path.lexeme());
     }
 
-    private AstFunction parseFunction() {
+    private AstFunction parseFunction(boolean publicItem) {
         Token name = expect(Token.TokenKind.IDENT, "Expected function name");
         expectSymbol("(");
         List<AstParam> params = new ArrayList<>();
@@ -64,7 +82,29 @@ public final class Parser implements ParserStrategy {
             returnType = parseTypeName();
         }
         List<AstStmt> body = parseBlock();
-        return new AstFunction(name.lexeme(), params, returnType, body);
+        return new AstFunction(name.lexeme(), params, returnType, body, publicItem, sourceFile.path());
+    }
+
+    private AstImport parseMod() {
+        List<String> path = parsePath();
+        expectSymbol(";");
+        return new AstImport(String.join("/", path) + ".just");
+    }
+
+    private AstUse parseUse() {
+        List<String> path = parsePath();
+        if (path.size() < 2) {
+            throw error(previous(), "use requires a module and symbol (e.g., use util::helper;)");
+        }
+        String symbol = path.get(path.size() - 1);
+        String module = String.join("::", path.subList(0, path.size() - 1));
+        String alias = symbol;
+        if (matchKeyword("as")) {
+            Token aliasToken = expect(Token.TokenKind.IDENT, "Expected alias after 'as'");
+            alias = aliasToken.lexeme();
+        }
+        expectSymbol(";");
+        return new AstUse(module, symbol, alias, sourceFile.path());
     }
 
     private AstStmt parseStatement() {

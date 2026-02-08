@@ -12,10 +12,18 @@ public final class RunCommand implements Command {
 
     @Override
     public int run() {
-        Path base = Files.isDirectory(inputPath) ? inputPath : inputPath.getParent();
-        Path outputJar = base.resolve("build/just.jar");
         ProjectLoader loader = new ProjectLoader();
-        ProjectConfig config = loader.load(inputPath);
+        ProjectConfig config;
+        try {
+            config = loader.load(inputPath);
+        } catch (RuntimeException error) {
+            System.err.println(error.getMessage());
+            return 2;
+        }
+        Path base = config.projectRoot() != null
+            ? config.projectRoot()
+            : (Files.isDirectory(inputPath) ? inputPath : inputPath.getParent());
+        Path outputJar = base.resolve("build/just.jar");
         CompilerService compilerService = new CompilerService();
         var result = compilerService.build(config, outputJar);
         for (var diagnostic : result.diagnostics()) {

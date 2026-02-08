@@ -1,10 +1,13 @@
 package org.justlang.compiler;
 
+import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.justlang.compiler.borrow.BorrowFlowAnalyzer;
@@ -13,6 +16,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
     private TypeId currentReturnType = TypeId.VOID;
     private final Deque<LoopContext> loopStack = new ArrayDeque<>();
     private BorrowFlowAnalyzer borrowFlow;
+    private Path currentFunctionSourcePath;
+    private String currentFunctionModule = "main";
+    private Map<String, String> currentUseAliases = Map.of();
 
     public TypedModule typeCheck(HirModule module) {
         throw new UnsupportedOperationException("Type checker not implemented yet");
@@ -24,6 +30,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
         StructRegistry structs = new StructRegistry();
         EnumRegistry enums = new EnumRegistry();
         FunctionRegistry functions = new FunctionRegistry();
+        Map<Path, Map<String, String>> useAliasesBySource = collectUseAliases(module, diagnostics);
         boolean success = true;
 
         registerBuiltinEnums(enums);
@@ -82,18 +89,29 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     success = false;
                 }
 
-                functions.register(fn.name(), new FunctionRegistry.FunctionSig(fn.name(), returnType, paramTypes));
+                String moduleName = moduleNameFor(fn.sourcePath());
+                functions.register(
+                    fn.name(),
+                    new FunctionRegistry.FunctionSig(
+                        fn.name(),
+                        returnType,
+                        paramTypes,
+                        moduleName,
+                        fn.sourcePath(),
+                        fn.isPublicItem()
+                    )
+                );
             }
         }
 
         for (AstItem item : module.items()) {
             if (item instanceof AstFunction fn) {
-                if (!checkFunction(fn, structs, enums, functions, diagnostics)) {
+                if (!checkFunction(fn, structs, enums, functions, diagnostics, useAliasesBySource)) {
                     success = false;
                 }
                 continue;
             }
-            if (!(item instanceof AstStruct) && !(item instanceof AstEnum) && !(item instanceof AstImport)) {
+            if (!(item instanceof AstStruct) && !(item instanceof AstEnum) && !(item instanceof AstImport) && !(item instanceof AstUse)) {
                 diagnostics.addError("Unsupported item: " + item.getClass().getSimpleName());
                 success = false;
             }
@@ -102,7 +120,14 @@ public final class TypeChecker implements TypeCheckerStrategy {
         return new TypeResult(success, diagnostics);
     }
 
-    private boolean checkFunction(AstFunction fn, StructRegistry structs, EnumRegistry enums, FunctionRegistry functions, TypeEnvironment diagnostics) {
+    private boolean checkFunction(
+        AstFunction fn,
+        StructRegistry structs,
+        EnumRegistry enums,
+        FunctionRegistry functions,
+        TypeEnvironment diagnostics,
+        Map<Path, Map<String, String>> useAliasesBySource
+    ) {
         boolean success = true;
         TypeId expectedReturn = resolveReturnType(fn.returnType(), structs, enums, diagnostics);
         if (expectedReturn == TypeId.UNKNOWN) {
@@ -124,13 +149,22 @@ public final class TypeChecker implements TypeCheckerStrategy {
 
         TypeId previousReturn = currentReturnType;
         BorrowFlowAnalyzer previousBorrowFlow = borrowFlow;
+        Path previousSource = currentFunctionSourcePath;
+        String previousModule = currentFunctionModule;
+        Map<String, String> previousUseAliases = currentUseAliases;
         currentReturnType = expectedReturn;
         borrowFlow = BorrowFlowAnalyzer.lexical();
+        currentFunctionSourcePath = fn.sourcePath();
+        currentFunctionModule = moduleNameFor(fn.sourcePath());
+        currentUseAliases = useAliasesBySource.getOrDefault(fn.sourcePath(), Map.of());
         if (!checkBlock(fn.body(), locals, structs, enums, functions, expectedReturn, diagnostics)) {
             success = false;
         }
         currentReturnType = previousReturn;
         borrowFlow = previousBorrowFlow;
+        currentFunctionSourcePath = previousSource;
+        currentFunctionModule = previousModule;
+        currentUseAliases = previousUseAliases;
 
         if (expectedReturn != TypeId.VOID && !endsWithReturnValue(fn.body())) {
             diagnostics.addError("Non-void functions must return on all paths");
@@ -848,6 +882,13 @@ public final class TypeChecker implements TypeCheckerStrategy {
         }
 
         if (callExpr.callee().size() == 2) {
+            FunctionRegistry.FunctionSig qualifiedFunction = resolveQualifiedFunction(callExpr, functions, diagnostics);
+            if (qualifiedFunction != null) {
+                return inferFunctionCallArgs(callExpr, qualifiedFunction, locals, structs, enums, functions, diagnostics);
+            }
+        }
+
+        if (callExpr.callee().size() == 2) {
             String enumName = callExpr.callee().get(0);
             String variantName = callExpr.callee().get(1);
             if ("Option".equals(enumName)) {
@@ -950,11 +991,24 @@ public final class TypeChecker implements TypeCheckerStrategy {
         }
 
         String name = callExpr.callee().get(0);
-        FunctionRegistry.FunctionSig sig = functions.find(name);
+        FunctionRegistry.FunctionSig sig = resolveUnqualifiedFunction(name, functions, diagnostics);
         if (sig == null) {
-            diagnostics.addError("Unknown function: " + name);
             return TypeId.UNKNOWN;
         }
+
+        return inferFunctionCallArgs(callExpr, sig, locals, structs, enums, functions, diagnostics);
+    }
+
+    private TypeId inferFunctionCallArgs(
+        AstCallExpr callExpr,
+        FunctionRegistry.FunctionSig sig,
+        TypeEnvironment locals,
+        StructRegistry structs,
+        EnumRegistry enums,
+        FunctionRegistry functions,
+        TypeEnvironment diagnostics
+    ) {
+        String name = callExpr.callee().size() == 1 ? callExpr.callee().get(0) : String.join("::", callExpr.callee());
 
         if (sig.paramCount() != callExpr.args().size()) {
             diagnostics.addError("Function '" + name + "' expects " + sig.paramCount() + " arguments");
@@ -977,6 +1031,87 @@ public final class TypeChecker implements TypeCheckerStrategy {
         }
 
         return sig.returnType();
+    }
+
+    private FunctionRegistry.FunctionSig resolveQualifiedFunction(
+        AstCallExpr callExpr,
+        FunctionRegistry functions,
+        TypeEnvironment diagnostics
+    ) {
+        String moduleName = callExpr.callee().get(0);
+        String symbolName = callExpr.callee().get(1);
+        FunctionRegistry.FunctionSig sig = functions.find(symbolName);
+        if (sig == null || !moduleName.equals(sig.moduleName())) {
+            return null;
+        }
+        if (!isFunctionVisible(sig, true, diagnostics)) {
+            return null;
+        }
+        return sig;
+    }
+
+    private FunctionRegistry.FunctionSig resolveUnqualifiedFunction(
+        String functionName,
+        FunctionRegistry functions,
+        TypeEnvironment diagnostics
+    ) {
+        FunctionRegistry.FunctionSig local = functions.find(functionName);
+        if (local != null && isSameSource(local)) {
+            return local;
+        }
+
+        String aliasTarget = currentUseAliases.get(functionName);
+        if (aliasTarget != null) {
+            int separator = aliasTarget.indexOf("::");
+            if (separator < 0) {
+                diagnostics.addError("Invalid use target for alias '" + functionName + "': " + aliasTarget);
+                return null;
+            }
+            String moduleName = aliasTarget.substring(0, separator);
+            String symbolName = aliasTarget.substring(separator + 2);
+            FunctionRegistry.FunctionSig aliased = functions.find(symbolName);
+            if (aliased == null || !moduleName.equals(aliased.moduleName())) {
+                diagnostics.addError("Unknown use target: " + aliasTarget);
+                return null;
+            }
+            if (!isFunctionVisible(aliased, false, diagnostics)) {
+                return null;
+            }
+            return aliased;
+        }
+
+        if (local == null) {
+            diagnostics.addError("Unknown function: " + functionName);
+            return null;
+        }
+        if (local.publicItem()) {
+            diagnostics.addError(
+                "Function '" + functionName + "' from module '" + local.moduleName()
+                    + "' requires 'use " + local.moduleName() + "::" + local.name() + ";'"
+            );
+            return null;
+        }
+        diagnostics.addError("Function '" + functionName + "' is private to module '" + local.moduleName() + "'");
+        return null;
+    }
+
+    private boolean isFunctionVisible(FunctionRegistry.FunctionSig sig, boolean qualifiedCall, TypeEnvironment diagnostics) {
+        if (isSameSource(sig)) {
+            return true;
+        }
+        if (sig.publicItem()) {
+            return true;
+        }
+        String reference = qualifiedCall ? sig.moduleName() + "::" + sig.name() : sig.name();
+        diagnostics.addError("Function '" + reference + "' is private to module '" + sig.moduleName() + "'");
+        return false;
+    }
+
+    private boolean isSameSource(FunctionRegistry.FunctionSig sig) {
+        if (currentFunctionSourcePath == null || sig.sourcePath() == null) {
+            return false;
+        }
+        return currentFunctionSourcePath.equals(sig.sourcePath());
     }
 
     private TypeId inferBinary(AstBinaryExpr expr, TypeEnvironment locals, StructRegistry structs, EnumRegistry enums, FunctionRegistry functions, TypeEnvironment diagnostics) {
@@ -1101,6 +1236,36 @@ public final class TypeChecker implements TypeCheckerStrategy {
             return TypeId.enumType(name);
         }
         return TypeId.UNKNOWN;
+    }
+
+    private Map<Path, Map<String, String>> collectUseAliases(AstModule module, TypeEnvironment diagnostics) {
+        Map<Path, Map<String, String>> aliasesBySource = new HashMap<>();
+        for (AstItem item : module.items()) {
+            if (!(item instanceof AstUse useItem)) {
+                continue;
+            }
+            Path source = useItem.sourcePath();
+            if (source == null) {
+                continue;
+            }
+            Map<String, String> aliases = aliasesBySource.computeIfAbsent(source, ignored -> new HashMap<>());
+            String target = useItem.moduleName() + "::" + useItem.symbolName();
+            String previous = aliases.putIfAbsent(useItem.alias(), target);
+            if (previous != null && !previous.equals(target)) {
+                diagnostics.addError("Duplicate use alias '" + useItem.alias() + "' in module " + moduleNameFor(source));
+            }
+        }
+        return aliasesBySource;
+    }
+
+    private String moduleNameFor(Path sourcePath) {
+        if (sourcePath == null || sourcePath.getFileName() == null) {
+            return "main";
+        }
+        String fileName = sourcePath.getFileName().toString();
+        int dot = fileName.lastIndexOf('.');
+        String base = dot > 0 ? fileName.substring(0, dot) : fileName;
+        return base.replace('-', '_');
     }
 
     private void registerBuiltinEnums(EnumRegistry enums) {

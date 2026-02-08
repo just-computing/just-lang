@@ -1,5 +1,6 @@
 package org.justlang.compiler;
 
+import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -20,11 +21,15 @@ public final class Codegen implements CodegenStrategy {
     private final Map<String, StructLayout> structLayouts = new HashMap<>();
     private final Map<String, EnumLayout> enumLayouts = new HashMap<>();
     private final Map<String, FunctionInfo> functions = new HashMap<>();
+    private final Map<Path, Map<String, String>> useAliasesBySource = new HashMap<>();
     private final Deque<LoopContext> loopStack = new ArrayDeque<>();
     private ReturnInfo currentReturnInfo;
+    private Map<String, String> currentUseAliases = Map.of();
+    private String currentFunctionModule = "main";
 
     @Override
     public List<ClassFile> emit(AstModule module) {
+        collectUseAliases(module);
         buildEnumLayouts(module);
         buildStructLayouts(module);
         buildFunctionRegistry(module);
@@ -291,7 +296,11 @@ public final class Codegen implements CodegenStrategy {
         mv.visitCode();
         ReturnInfo returnInfo = new ReturnInfo(info.returnKind(), info.returnStructName());
         ReturnInfo previousReturn = currentReturnInfo;
+        Map<String, String> previousUseAliases = currentUseAliases;
+        String previousModule = currentFunctionModule;
         currentReturnInfo = returnInfo;
+        currentUseAliases = useAliasesBySource.getOrDefault(fn.sourcePath(), Map.of());
+        currentFunctionModule = moduleNameFor(fn.sourcePath());
         LocalState locals = new LocalState(info.paramCount());
         int slot = 0;
         for (ParamInfo param : info.params()) {
@@ -300,6 +309,8 @@ public final class Codegen implements CodegenStrategy {
         }
         emitBlock(mv, fn.body(), locals, returnInfo);
         currentReturnInfo = previousReturn;
+        currentUseAliases = previousUseAliases;
+        currentFunctionModule = previousModule;
         if (returnInfo.kind() == ValueKind.VOID) {
             mv.visitInsn(Opcodes.RETURN);
         }
@@ -324,9 +335,15 @@ public final class Codegen implements CodegenStrategy {
         LocalState locals = new LocalState(1);
         ReturnInfo returnInfo = new ReturnInfo(ValueKind.VOID, null);
         ReturnInfo previousReturn = currentReturnInfo;
+        Map<String, String> previousUseAliases = currentUseAliases;
+        String previousModule = currentFunctionModule;
         currentReturnInfo = returnInfo;
+        currentUseAliases = useAliasesBySource.getOrDefault(main.sourcePath(), Map.of());
+        currentFunctionModule = moduleNameFor(main.sourcePath());
         emitBlock(mv, main.body(), locals, returnInfo);
         currentReturnInfo = previousReturn;
+        currentUseAliases = previousUseAliases;
+        currentFunctionModule = previousModule;
 
         mv.visitInsn(Opcodes.RETURN);
         mv.visitMaxs(0, 0);
@@ -945,29 +962,21 @@ public final class Codegen implements CodegenStrategy {
     private ExprValue emitCall(MethodVisitor mv, AstCallExpr call, LocalState locals) {
         if (!isPrintCall(call)) {
             if (call.callee().size() == 2) {
+                FunctionInfo qualified = resolveQualifiedFunction(call.callee().get(0), call.callee().get(1));
+                if (qualified != null) {
+                    return emitFunctionCall(mv, call, locals, qualified, String.join("::", call.callee()));
+                }
                 return emitEnumCall(mv, call, locals);
             }
             if (call.callee().size() != 1) {
                 throw new IllegalStateException("Only direct function calls are supported");
             }
-            String name = call.callee().get(0);
-            FunctionInfo info = functions.get(name);
+            String lookup = call.callee().get(0);
+            FunctionInfo info = resolveUnqualifiedFunction(lookup);
             if (info == null) {
-                throw new IllegalStateException("Unknown function: " + name);
+                throw new IllegalStateException("Unknown function: " + lookup);
             }
-            if (call.args().size() != info.paramCount()) {
-                throw new IllegalStateException("Function '" + name + "' expects " + info.paramCount() + " arguments");
-            }
-            for (int i = 0; i < call.args().size(); i++) {
-                ExprValue arg = emitExpr(mv, call.args().get(i), locals);
-                ParamInfo param = info.params().get(i);
-                ExprValue coerced = coerceToExpected(mv, arg, new ReturnInfo(param.kind(), param.structName()));
-                if (coerced == null) {
-                    throw new IllegalStateException("Argument " + (i + 1) + " type mismatch for function " + name);
-                }
-            }
-            mv.visitMethodInsn(Opcodes.INVOKESTATIC, MAIN_INTERNAL_NAME, name, info.descriptor(), false);
-            return new ExprValue(info.returnKind(), info.returnStructName());
+            return emitFunctionCall(mv, call, locals, info, lookup);
         }
         if (call.args().size() != 1) {
             throw new IllegalStateException("print expects exactly one argument");
@@ -986,6 +995,53 @@ public final class Codegen implements CodegenStrategy {
             throw new IllegalStateException("Unsupported print argument type: " + arg.kind());
         }
         return ExprValue.of(ValueKind.VOID);
+    }
+
+    private ExprValue emitFunctionCall(
+        MethodVisitor mv,
+        AstCallExpr call,
+        LocalState locals,
+        FunctionInfo info,
+        String displayName
+    ) {
+        if (call.args().size() != info.paramCount()) {
+            throw new IllegalStateException("Function '" + displayName + "' expects " + info.paramCount() + " arguments");
+        }
+        for (int i = 0; i < call.args().size(); i++) {
+            ExprValue arg = emitExpr(mv, call.args().get(i), locals);
+            ParamInfo param = info.params().get(i);
+            ExprValue coerced = coerceToExpected(mv, arg, new ReturnInfo(param.kind(), param.structName()));
+            if (coerced == null) {
+                throw new IllegalStateException("Argument " + (i + 1) + " type mismatch for function " + displayName);
+            }
+        }
+        mv.visitMethodInsn(Opcodes.INVOKESTATIC, MAIN_INTERNAL_NAME, info.name(), info.descriptor(), false);
+        return new ExprValue(info.returnKind(), info.returnStructName());
+    }
+
+    private FunctionInfo resolveQualifiedFunction(String moduleName, String symbolName) {
+        FunctionInfo info = functions.get(symbolName);
+        if (info == null) {
+            return null;
+        }
+        if (!moduleName.equals(info.moduleName())) {
+            return null;
+        }
+        return info;
+    }
+
+    private FunctionInfo resolveUnqualifiedFunction(String symbolName) {
+        FunctionInfo local = functions.get(symbolName);
+        if (local != null && currentFunctionModule.equals(local.moduleName())) {
+            return local;
+        }
+        if (local != null && currentUseAliases.containsKey(symbolName)) {
+            String expected = currentUseAliases.get(symbolName);
+            if (expected.equals(local.moduleName() + "::" + local.name())) {
+                return local;
+            }
+        }
+        return null;
     }
 
     private ExprValue emitEnumPath(MethodVisitor mv, AstPathExpr pathExpr, LocalState locals) {
@@ -1420,6 +1476,21 @@ public final class Codegen implements CodegenStrategy {
         }
     }
 
+    private void collectUseAliases(AstModule module) {
+        useAliasesBySource.clear();
+        for (AstItem item : module.items()) {
+            if (!(item instanceof AstUse useItem)) {
+                continue;
+            }
+            Path sourcePath = useItem.sourcePath();
+            if (sourcePath == null) {
+                continue;
+            }
+            Map<String, String> aliases = useAliasesBySource.computeIfAbsent(sourcePath, ignored -> new HashMap<>());
+            aliases.put(useItem.alias(), useItem.moduleName() + "::" + useItem.symbolName());
+        }
+    }
+
     private void buildEnumLayouts(AstModule module) {
         Set<String> structNames = new HashSet<>();
         Set<String> enumNames = new HashSet<>();
@@ -1679,7 +1750,17 @@ public final class Codegen implements CodegenStrategy {
         ValueKind kind = toValueKind(returnType);
         TypeId erasedReturnType = runtimeType(returnType);
         String structName = erasedReturnType.isStruct() ? erasedReturnType.structName() : erasedReturnType.isEnum() ? erasedReturnType.enumName() : null;
-        return new FunctionInfo(fn.name(), kind, structName, descriptor.toString(), params);
+        return new FunctionInfo(fn.name(), moduleNameFor(fn.sourcePath()), kind, structName, descriptor.toString(), params);
+    }
+
+    private String moduleNameFor(Path sourcePath) {
+        if (sourcePath == null || sourcePath.getFileName() == null) {
+            return "main";
+        }
+        String fileName = sourcePath.getFileName().toString();
+        int dot = fileName.lastIndexOf('.');
+        String base = dot > 0 ? fileName.substring(0, dot) : fileName;
+        return base.replace('-', '_');
     }
 
     private ValueKind toValueKind(TypeId type) {
@@ -1760,7 +1841,14 @@ public final class Codegen implements CodegenStrategy {
 
     private record ParamInfo(String name, ValueKind kind, String structName, String descriptor) {}
 
-    private record FunctionInfo(String name, ValueKind returnKind, String returnStructName, String descriptor, List<ParamInfo> params) {
+    private record FunctionInfo(
+        String name,
+        String moduleName,
+        ValueKind returnKind,
+        String returnStructName,
+        String descriptor,
+        List<ParamInfo> params
+    ) {
         int paramCount() {
             return params.size();
         }

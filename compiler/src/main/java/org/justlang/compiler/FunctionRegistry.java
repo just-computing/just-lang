@@ -1,5 +1,6 @@
 package org.justlang.compiler;
 
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -19,7 +20,14 @@ public final class FunctionRegistry {
         return functions.containsKey(name);
     }
 
-    public record FunctionSig(String name, TypeId returnType, List<TypeId> paramTypes) {
+    public record FunctionSig(
+        String name,
+        TypeId returnType,
+        List<TypeId> paramTypes,
+        String moduleName,
+        Path sourcePath,
+        boolean publicItem
+    ) {
         public int paramCount() {
             return paramTypes.size();
         }

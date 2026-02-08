@@ -23,7 +23,11 @@ public final class Lexer implements LexerStrategy {
         "match",
         "break",
         "continue",
-        "import"
+        "import",
+        "mod",
+        "use",
+        "pub",
+        "as"
     );
 
     @Override

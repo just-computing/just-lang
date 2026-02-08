@@ -29,8 +29,11 @@ public class JargoNewCommandTest {
         assertTrue(Files.exists(appFile));
 
         String main = Files.readString(mainFile);
-        assertTrue(main.contains("import \"app.just\";"));
+        assertTrue(main.contains("mod app;"));
+        assertTrue(main.contains("use app::app_greeting;"));
         assertTrue(main.contains("app_greeting()"));
+        String app = Files.readString(appFile);
+        assertTrue(app.contains("pub fn app_greeting()"));
     }
 
     @Test

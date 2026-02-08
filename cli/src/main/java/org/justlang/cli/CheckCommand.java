@@ -12,7 +12,13 @@ public final class CheckCommand implements Command {
     @Override
     public int run() {
         ProjectLoader loader = new ProjectLoader();
-        ProjectConfig config = loader.load(inputPath);
+        ProjectConfig config;
+        try {
+            config = loader.load(inputPath);
+        } catch (RuntimeException error) {
+            System.err.println(error.getMessage());
+            return 2;
+        }
         CompilerService compilerService = new CompilerService();
         var result = compilerService.check(config);
         for (var diagnostic : result.diagnostics()) {

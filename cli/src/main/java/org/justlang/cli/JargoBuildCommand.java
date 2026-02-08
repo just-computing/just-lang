@@ -18,22 +18,15 @@ public final class JargoBuildCommand implements Command {
             System.err.println("Missing just.toml in " + projectRoot);
             return 2;
         }
-        ProjectManifest parsed;
-        try {
-            parsed = ProjectManifest.load(manifest);
-        } catch (Exception error) {
-            System.err.println("Failed to read just.toml: " + error.getMessage());
-            return 2;
-        }
-        String mainPath = parsed.main() == null ? "src/main.just" : parsed.main();
-        Path mainFile = projectRoot.resolve(mainPath).normalize();
-        if (!Files.exists(mainFile)) {
-            System.err.println("Missing main file: " + mainFile);
-            return 2;
-        }
         Path outputJar = projectRoot.resolve("build/just.jar");
         ProjectLoader loader = new ProjectLoader();
-        ProjectConfig config = loader.load(mainFile);
+        ProjectConfig config;
+        try {
+            config = loader.load(projectRoot);
+        } catch (RuntimeException error) {
+            System.err.println(error.getMessage());
+            return 2;
+        }
         CompilerService compilerService = new CompilerService();
         CompileResult result = compilerService.build(config, outputJar);
         for (var diagnostic : result.diagnostics()) {

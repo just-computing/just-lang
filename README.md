@@ -60,8 +60,34 @@ import "app.just";
 import "feature/math.just";
 ```
 
+Or module declarations:
+
+```just
+mod app;
+mod feature::math;
+```
+
+Public module API and symbol imports:
+
+```just
+use app::app_greeting;
+
+pub fn app_greeting() -> String {
+    return "hello";
+}
+```
+
 Import paths are resolved relative to the importing source file.
 The compiler loads imports transitively and reports errors for missing files or import cycles.
+Cross-file unqualified calls require `use module::symbol;` and private (`fn`) module functions are not callable from other modules.
+In this iteration, visibility enforcement is implemented for functions (`pub fn`).
+
+Dependency imports (from `just.toml` aliases) use `@alias/...`:
+
+```just
+import "@shared/math.just";
+use math::double_value;
+```
 
 Project commands:
 
@@ -76,6 +102,16 @@ Project commands:
 - `src/main.just` as entrypoint
 - `src/app.just` as an imported module
 - `just.toml` with `main = "src/main.just"`
+
+`just.toml` controls build entrypoint:
+
+```toml
+name = "my-app"
+main = "src/main.just"
+
+[dependencies]
+shared = { path = "../shared-lib" }
+```
 
 ## Merge sort sample
 

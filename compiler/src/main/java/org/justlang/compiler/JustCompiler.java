@@ -36,7 +36,7 @@ public final class JustCompiler {
                 Project project = new Project(inputPath);
                 sources.addAll(loader.load(project));
             } else {
-                sources.addAll(loader.loadFileGraph(inputPath));
+                sources.addAll(loader.loadFileGraph(inputPath, request.dependencyRoots()));
             }
         } catch (RuntimeException error) {
             diagnostics.report(new Diagnostic(error.getMessage(), inputPath));

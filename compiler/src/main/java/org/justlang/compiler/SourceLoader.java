@@ -18,6 +18,7 @@ import java.util.stream.Stream;
 
 public final class SourceLoader {
     private static final Pattern IMPORT_PATTERN = Pattern.compile("^\\s*import\\s+\"([^\"]+)\"\\s*;\\s*$");
+    private static final Pattern MOD_PATTERN = Pattern.compile("^\\s*mod\\s+([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)\\s*;\\s*$");
 
     public List<SourceFile> load(Project project) {
         List<SourceFile> sources = new ArrayList<>();
@@ -53,10 +54,14 @@ public final class SourceLoader {
      * <p>Complexity: {@code O(V + E)} file visits + import edges (ignoring IO).
      */
     public List<SourceFile> loadFileGraph(Path entryPath) {
+        return loadFileGraph(entryPath, Map.of());
+    }
+
+    public List<SourceFile> loadFileGraph(Path entryPath, Map<String, Path> dependencyRoots) {
         Map<Path, SourceFile> ordered = new LinkedHashMap<>();
         Set<Path> onStack = new HashSet<>();
         Deque<Path> stack = new ArrayDeque<>();
-        loadRecursive(entryPath.toAbsolutePath().normalize(), ordered, onStack, stack);
+        loadRecursive(entryPath.toAbsolutePath().normalize(), ordered, onStack, stack, dependencyRoots);
         return new ArrayList<>(ordered.values());
     }
 
@@ -79,7 +84,8 @@ public final class SourceLoader {
         Path path,
         Map<Path, SourceFile> ordered,
         Set<Path> onStack,
-        Deque<Path> stack
+        Deque<Path> stack,
+        Map<String, Path> dependencyRoots
     ) {
         if (ordered.containsKey(path)) {
             return;
@@ -95,8 +101,8 @@ public final class SourceLoader {
         stack.push(path);
         SourceFile source = read(path);
         for (String importPath : parseImports(source.contents())) {
-            Path resolved = path.getParent().resolve(importPath).normalize();
-            loadRecursive(resolved, ordered, onStack, stack);
+            Path resolved = resolveImportPath(path, importPath, dependencyRoots);
+            loadRecursive(resolved, ordered, onStack, stack, dependencyRoots);
         }
         stack.pop();
         onStack.remove(path);
@@ -114,9 +120,31 @@ public final class SourceLoader {
             Matcher matcher = IMPORT_PATTERN.matcher(trimmed);
             if (matcher.matches()) {
                 imports.add(matcher.group(1));
+                continue;
+            }
+            Matcher modMatcher = MOD_PATTERN.matcher(trimmed);
+            if (modMatcher.matches()) {
+                imports.add(modMatcher.group(1).replace("::", "/") + ".just");
             }
         }
         return imports;
+    }
+
+    private Path resolveImportPath(Path currentFile, String importPath, Map<String, Path> dependencyRoots) {
+        if (importPath.startsWith("@")) {
+            int slash = importPath.indexOf('/');
+            String alias = slash > 0 ? importPath.substring(1, slash) : importPath.substring(1);
+            Path root = dependencyRoots.get(alias);
+            if (root == null) {
+                throw new RuntimeException("Unknown dependency alias in import: " + importPath);
+            }
+            String relative = slash > 0 && slash + 1 < importPath.length() ? importPath.substring(slash + 1) : "";
+            if (relative.isBlank()) {
+                throw new RuntimeException("Dependency import must include a file path: " + importPath);
+            }
+            return root.resolve(relative).normalize();
+        }
+        return currentFile.getParent().resolve(importPath).normalize();
     }
 
     private String formatCycle(Path repeatedPath, Deque<Path> stack) {

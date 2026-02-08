@@ -10,7 +10,7 @@ Parses Just source, performs name/type/borrow analysis, lowers to IR, monomorphi
 | --- | --- | --- |
 | `JustCompiler` | End-to-end compilation orchestrator. | `compile(CompileRequest): CompileResult` |
 | `CompilerConfig` | Compiler settings, target, and feature flags. | `fromToml(Path): CompilerConfig` |
-| `SourceLoader` | Reads source files and builds module graph from explicit imports. | `load(Project): List<SourceFile>`, `loadFileGraph(Path): List<SourceFile>` |
+| `SourceLoader` | Reads source files and builds module graph from imports/modules and dependency aliases. | `load(Project): List<SourceFile>`, `loadFileGraph(Path, Map<String, Path>): List<SourceFile>` |
 | `Lexer` | Tokenizes source text. | `lex(SourceFile): List<Token>` |
 | `Parser` | Builds AST from tokens. | `parse(List<Token>): AstModule` |
 | `NameResolver` | Resolves symbols to bindings. | `resolve(AstModule): HirModule` |
@@ -30,7 +30,7 @@ Parses Just source, performs name/type/borrow analysis, lowers to IR, monomorphi
 
 1. `SourceLoader` reads project sources:
    - directory mode scans `.just` files
-   - file mode resolves transitive `import "path.just";` dependencies
+   - file mode resolves transitive `import "path.just";`, `mod module;`, and `import "@dep/path.just";`
 2. `Lexer` produces tokens from each source file.
 3. `Parser` builds AST (`AstModule` and items).
 4. `NameResolver` produces HIR with resolved bindings.
@@ -58,6 +58,8 @@ Parses Just source, performs name/type/borrow analysis, lowers to IR, monomorphi
 
 - Functions with typed parameters and return types (`fn add(a: i32, b: i32) -> i32`).
 - Top-level file imports (`import "path.just";`) with transitive resolution.
+- Top-level module declarations (`mod feature::util;`) and symbol imports (`use util::helper;`).
+- `pub fn` for cross-module callable functions (`fn` stays module-private).
 - `if` / `else if` / `else` statements and `if` expressions.
 - `while`, `for i in 0..N` / `0..=N`, and `loop {}` (infinite loop).
 - `break`, `break <expr>` (loop expressions only), `continue`, and optional loop labels (`'outer:`).

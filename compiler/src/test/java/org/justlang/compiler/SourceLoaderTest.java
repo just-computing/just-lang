@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -73,5 +74,56 @@ public class SourceLoaderTest {
         SourceLoader loader = new SourceLoader();
         RuntimeException error = assertThrows(RuntimeException.class, () -> loader.loadFileGraph(a));
         assertTrue(error.getMessage().contains("Import cycle detected:"));
+    }
+
+    @Test
+    void loadFileGraphSupportsModDeclarations() throws IOException {
+        Path main = tempDir.resolve("main.just");
+        Path featureDir = tempDir.resolve("feature");
+        Files.createDirectories(featureDir);
+        Path util = featureDir.resolve("util.just");
+
+        Files.writeString(main, """
+            mod feature::util;
+
+            fn main() { return; }
+            """);
+        Files.writeString(util, "fn helper() { return; }\n");
+
+        SourceLoader loader = new SourceLoader();
+        List<SourceFile> sources = loader.loadFileGraph(main);
+        List<Path> loaded = sources.stream().map(SourceFile::path).toList();
+        assertEquals(List.of(util.toAbsolutePath().normalize(), main.toAbsolutePath().normalize()), loaded);
+    }
+
+    @Test
+    void loadFileGraphResolvesDependencyAliasImports() throws IOException {
+        Path depRoot = tempDir.resolve("dep");
+        Files.createDirectories(depRoot);
+        Path depFile = depRoot.resolve("math.just");
+        Files.writeString(depFile, "fn double(x: i32) -> i32 { return x * 2; }\n");
+        Path main = tempDir.resolve("main.just");
+        Files.writeString(main, """
+            import "@utils/math.just";
+            fn main() { return; }
+            """);
+
+        SourceLoader loader = new SourceLoader();
+        List<SourceFile> sources = loader.loadFileGraph(main, Map.of("utils", depRoot));
+        List<Path> loaded = sources.stream().map(SourceFile::path).toList();
+        assertEquals(List.of(depFile.toAbsolutePath().normalize(), main.toAbsolutePath().normalize()), loaded);
+    }
+
+    @Test
+    void loadFileGraphFailsForUnknownDependencyAlias() throws IOException {
+        Path main = tempDir.resolve("main.just");
+        Files.writeString(main, """
+            import "@unknown/math.just";
+            fn main() { return; }
+            """);
+
+        SourceLoader loader = new SourceLoader();
+        RuntimeException error = assertThrows(RuntimeException.class, () -> loader.loadFileGraph(main, Map.of()));
+        assertTrue(error.getMessage().contains("Unknown dependency alias in import"));
     }
 }

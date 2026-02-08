@@ -28,7 +28,8 @@ public final class JargoNewCommand implements Command {
             if (!Files.exists(mainFile)) {
                 Files.writeString(
                     mainFile,
-                    "import \"app.just\";\n\n"
+                    "mod app;\n"
+                        + "use app::app_greeting;\n\n"
                         + "fn main() {\n"
                         + "    std::print(app_greeting());\n"
                         + "    return;\n"
@@ -38,7 +39,7 @@ public final class JargoNewCommand implements Command {
             if (!Files.exists(appFile)) {
                 Files.writeString(
                     appFile,
-                    "fn app_greeting() -> String {\n"
+                    "pub fn app_greeting() -> String {\n"
                         + "    return \"hello from " + name + "\";\n"
                         + "}\n"
                 );
