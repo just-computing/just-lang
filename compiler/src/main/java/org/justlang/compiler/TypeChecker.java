@@ -256,6 +256,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                         }
                     }
                     if ("=".equals(op) && success) {
+                        locals.joinType(assignStmt.name(), valueType);
                         locals.clearMoved(assignStmt.name());
                     }
                     continue;
@@ -283,8 +284,12 @@ public final class TypeChecker implements TypeCheckerStrategy {
                         success = false;
                     }
                     locals.joinMovedFrom(thenLocals, elseLocals);
+                    if (!locals.joinTypesFromStrict(thenLocals, elseLocals, diagnostics::addError)) {
+                        success = false;
+                    }
                 } else {
                     locals.mergeMovedFrom(thenLocals);
+                    locals.mergeTypesFrom(thenLocals);
                 }
                 continue;
             }
@@ -307,6 +312,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 }
                 loopStack.pop();
                 locals.mergeMovedFrom(loopLocals);
+                locals.mergeTypesFrom(loopLocals);
                 continue;
             }
             if (stmt instanceof AstWhileLetStmt whileLetStmt) {
@@ -330,6 +336,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 }
                 loopStack.pop();
                 locals.mergeMovedFrom(loopLocals);
+                locals.mergeTypesFrom(loopLocals);
                 continue;
             }
             if (stmt instanceof AstLoopStmt loopStmt) {
@@ -340,6 +347,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 }
                 loopStack.pop();
                 locals.mergeMovedFrom(loopLocals);
+                locals.mergeTypesFrom(loopLocals);
                 continue;
             }
             if (stmt instanceof AstBreakStmt breakStmt) {
@@ -489,8 +497,12 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 success = false;
             }
             locals.joinMovedFrom(thenLocals, elseLocals);
+            if (!locals.joinTypesFromStrict(thenLocals, elseLocals, diagnostics::addError)) {
+                success = false;
+            }
         } else {
             locals.mergeMovedFrom(thenLocals);
+            locals.mergeTypesFrom(thenLocals);
         }
         return success;
     }
@@ -522,6 +534,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
         boolean success = checkBlock(whileLetStmt.body(), bodyLocals, structs, enums, functions, expectedReturn, diagnostics);
         loopStack.pop();
         locals.mergeMovedFrom(bodyLocals);
+        locals.mergeTypesFrom(bodyLocals);
         return success;
     }
 
@@ -572,7 +585,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                     diagnostics.addError("Unsupported field type: " + target.type());
                     return TypeId.UNKNOWN;
                 }
-                if (!fieldType.equals(valueType)) {
+                if (!isAssignable(fieldType, valueType)) {
                     diagnostics.addError("Type mismatch for field '" + field.name() + "': expected " + fieldType + " got " + valueType);
                     return TypeId.UNKNOWN;
                 }
@@ -620,18 +633,22 @@ public final class TypeChecker implements TypeCheckerStrategy {
             TypeId thenType = inferExpr(ifExpr.thenExpr(), thenLocals, structs, enums, functions, diagnostics);
             TypeId elseType = inferExpr(ifExpr.elseExpr(), elseLocals, structs, enums, functions, diagnostics);
             locals.joinMovedFrom(thenLocals, elseLocals);
+            if (!locals.joinTypesFromStrict(thenLocals, elseLocals, diagnostics::addError)) {
+                return TypeId.UNKNOWN;
+            }
             if (thenType == TypeId.UNKNOWN || elseType == TypeId.UNKNOWN) {
                 return TypeId.UNKNOWN;
             }
-            if (!thenType.equals(elseType)) {
-                diagnostics.addError("if expression branches must match: " + thenType + " vs " + elseType);
-                return TypeId.UNKNOWN;
-            }
-            if (thenType == TypeId.VOID) {
+            if (thenType == TypeId.VOID || elseType == TypeId.VOID) {
                 diagnostics.addError("if expression cannot be void");
                 return TypeId.UNKNOWN;
             }
-            return thenType;
+            TypeId joinedType = TypeUnifier.join(thenType, elseType);
+            if (joinedType == TypeId.ANY && thenType != TypeId.ANY && elseType != TypeId.ANY) {
+                diagnostics.addError("if expression branches must match: " + thenType + " vs " + elseType);
+                return TypeId.UNKNOWN;
+            }
+            return joinedType;
         }
         if (expr instanceof AstBlockExpr blockExpr) {
             TypeEnvironment blockLocals = locals.fork();
@@ -644,6 +661,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 return TypeId.UNKNOWN;
             }
             locals.adoptMovedFrom(blockLocals);
+            locals.adoptTypesFrom(blockLocals);
             return valueType;
         }
         if (expr instanceof AstLoopExpr loopExpr) {
@@ -656,6 +674,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
             }
             loopStack.pop();
             locals.mergeMovedFrom(loopLocals);
+            locals.mergeTypesFrom(loopLocals);
             if (context.breakType == null) {
                 diagnostics.addError("loop expression requires break with value");
                 return TypeId.UNKNOWN;
@@ -744,9 +763,13 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 }
                 if (armType == null) {
                     armType = valueType;
-                } else if (!armType.equals(valueType)) {
-                    diagnostics.addError("match arms must return the same type");
-                    return TypeId.UNKNOWN;
+                } else {
+                    TypeId joined = TypeUnifier.join(armType, valueType);
+                    if (joined == TypeId.ANY && armType != TypeId.ANY && valueType != TypeId.ANY) {
+                        diagnostics.addError("match arms must return the same type");
+                        return TypeId.UNKNOWN;
+                    }
+                    armType = joined;
                 }
             }
             boolean enumExhaustive = targetEnum != null
@@ -754,6 +777,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 && coveredVariants.size() == targetEnum.variants().size();
             boolean exhaustive = hasWildcard || enumExhaustive;
             locals.joinMovedFromAll(armLocalsList, !exhaustive);
+            if (!locals.joinTypesFromAllStrict(armLocalsList, !exhaustive, diagnostics::addError)) {
+                return TypeId.UNKNOWN;
+            }
             // Only warn when no wildcard is present; for enums, report the specific missing variants.
             if (!hasWildcard) {
                 if (targetEnum != null) {
@@ -904,7 +930,7 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 diagnostics.addError("Unknown payload type: " + variant.payloadType());
                 return TypeId.UNKNOWN;
             }
-            if (payloadType != TypeId.ANY && !payloadType.equals(argType)) {
+            if (payloadType != TypeId.ANY && !isAssignable(payloadType, argType)) {
                 diagnostics.addError("Variant '" + variantName + "' expects " + payloadType + " got " + argType);
                 return TypeId.UNKNOWN;
             }
@@ -941,6 +967,9 @@ public final class TypeChecker implements TypeCheckerStrategy {
             if (!isAssignable(paramTypes.get(i), argType)) {
                 diagnostics.addError("Argument " + (i + 1) + " of '" + name + "' expected " + paramTypes.get(i) + " got " + argType);
                 return TypeId.UNKNOWN;
+            }
+            if (callExpr.args().get(i) instanceof AstIdentExpr identExpr) {
+                locals.refineType(identExpr.name(), paramTypes.get(i));
             }
             if (!paramTypes.get(i).isReference() && !consumeMoveCandidate(callExpr.args().get(i), argType, locals, diagnostics)) {
                 return TypeId.UNKNOWN;

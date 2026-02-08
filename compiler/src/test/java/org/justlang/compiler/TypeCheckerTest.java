@@ -1867,6 +1867,142 @@ public class TypeCheckerTest {
     }
 
     @Test
+    void optionTypeIsInferredFromAssignmentAfterNone() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let mut opt = Option::None;
+                opt = Option::Some(3);
+                if let Option::Some(x) = opt {
+                    std::print(x + 1);
+                }
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void optionTypeIsInferredAcrossIfBranches() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let mut opt = Option::None;
+                if true {
+                    opt = Option::Some(3);
+                } else {
+                    opt = Option::Some(4);
+                }
+                if let Option::Some(x) = opt {
+                    std::print(x + 1);
+                }
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void optionTypeMismatchAfterInferenceFails() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let mut opt = Option::None;
+                opt = Option::Some(1);
+                opt = Option::Some("nope");
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Type mismatch in assignment to opt")));
+    }
+
+    @Test
+    void optionTypeMismatchAcrossIfBranchesFails() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let mut opt = Option::None;
+                if true {
+                    opt = Option::Some(1);
+                } else {
+                    opt = Option::Some("nope");
+                }
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Type mismatch across control flow for opt")));
+    }
+
+    @Test
+    void optionTypeIsInferredAcrossIfWithoutElse() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let mut opt = Option::None;
+                if true {
+                    opt = Option::Some(3);
+                }
+                if let Option::Some(x) = opt {
+                    std::print(x + 1);
+                }
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void ifExpressionUnifiesOptionNoneAndSome() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let opt = if true { Option::Some(1) } else { Option::None };
+                if let Option::Some(x) = opt {
+                    std::print(x + 1);
+                }
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void matchExpressionUnifiesOptionNoneAndSome() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let opt = match true {
+                    true => Option::Some(1),
+                    false => Option::None,
+                };
+                if let Option::Some(x) = opt {
+                    std::print(x + 1);
+                }
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void resultTypeIsInferredFromMixedOkErrAssignments() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                let mut res = Result::Err("oops");
+                res = Result::Ok(3);
+                if let Result::Ok(x) = res {
+                    std::print(x + 1);
+                }
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
     void assignmentCannotMoveBorrowedValue() {
         TypeResult result = typeCheck("""
             struct Item { value: i32 }
