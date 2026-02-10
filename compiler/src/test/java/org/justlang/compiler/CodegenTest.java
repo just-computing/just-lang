@@ -111,6 +111,30 @@ public class CodegenTest {
     }
 
     @Test
+    void runsPrintlnMacroProgram() throws Exception {
+        CodegenTestKit.Compilation compilation = CodegenTestKit.compile("""
+            fn main() {
+                println!(42);
+                return;
+            }
+            """);
+
+        assertEquals("42", compilation.runMainInMemory());
+    }
+
+    @Test
+    void runsFormattedPrintlnMacroProgram() throws Exception {
+        CodegenTestKit.Compilation compilation = CodegenTestKit.compile("""
+            fn main() {
+                println!("value={}", 42);
+                return;
+            }
+            """);
+
+        assertEquals("value=42", compilation.runMainInMemory());
+    }
+
+    @Test
     void runsBorrowAndDerefProgram() throws Exception {
         CodegenTestKit.Compilation compilation = CodegenTestKit.compile("""
             fn read(x: &i32) -> i32 {

@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -94,6 +95,66 @@ public class SourceLoaderTest {
         List<SourceFile> sources = loader.loadFileGraph(main);
         List<Path> loaded = sources.stream().map(SourceFile::path).toList();
         assertEquals(List.of(util.toAbsolutePath().normalize(), main.toAbsolutePath().normalize()), loaded);
+    }
+
+    @Test
+    void loadFileGraphSupportsRustModDeclarations() throws IOException {
+        Path main = tempDir.resolve("main.rs");
+        Path featureDir = tempDir.resolve("feature");
+        Files.createDirectories(featureDir);
+        Path util = featureDir.resolve("util.rs");
+
+        Files.writeString(main, """
+            mod feature::util;
+
+            fn main() { return; }
+            """);
+        Files.writeString(util, "fn helper() { return; }\n");
+
+        SourceLoader loader = new SourceLoader();
+        List<SourceFile> sources = loader.loadFileGraph(main);
+        List<Path> loaded = sources.stream().map(SourceFile::path).toList();
+        assertEquals(List.of(util.toAbsolutePath().normalize(), main.toAbsolutePath().normalize()), loaded);
+    }
+
+    @Test
+    void loadFileGraphSupportsRustModRsFiles() throws IOException {
+        Path main = tempDir.resolve("main.rs");
+        Path featureDir = tempDir.resolve("feature");
+        Files.createDirectories(featureDir);
+        Path modFile = featureDir.resolve("mod.rs");
+
+        Files.writeString(main, """
+            mod feature;
+
+            fn main() { return; }
+            """);
+        Files.writeString(modFile, "fn helper() { return; }\n");
+
+        SourceLoader loader = new SourceLoader();
+        List<SourceFile> sources = loader.loadFileGraph(main);
+        List<Path> loaded = sources.stream().map(SourceFile::path).toList();
+        assertEquals(List.of(modFile.toAbsolutePath().normalize(), main.toAbsolutePath().normalize()), loaded);
+    }
+
+    @Test
+    void loadProjectIncludesRustSources() throws IOException {
+        Path projectRoot = tempDir.resolve("project");
+        Path nested = projectRoot.resolve("nested");
+        Files.createDirectories(nested);
+        Path main = projectRoot.resolve("main.rs");
+        Path helper = nested.resolve("helper.rs");
+        Files.writeString(main, "fn main() { return; }\n");
+        Files.writeString(helper, "fn helper() { return; }\n");
+
+        SourceLoader loader = new SourceLoader();
+        List<SourceFile> sources = loader.load(new Project(projectRoot));
+
+        Set<Path> loaded = sources.stream().map(SourceFile::path).collect(java.util.stream.Collectors.toSet());
+        assertEquals(
+            Set.of(main.toAbsolutePath().normalize(), helper.toAbsolutePath().normalize()),
+            loaded
+        );
     }
 
     @Test

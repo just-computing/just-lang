@@ -184,6 +184,6 @@ public final class Lexer implements LexerStrategy {
     }
 
     private static boolean isSymbolStart(char c) {
-        return "(){}[],;=:+-*/&<>.!|'".indexOf(c) >= 0;
+        return "(){}[],;=:+-*/&<>.!|'#?".indexOf(c) >= 0;
     }
 }

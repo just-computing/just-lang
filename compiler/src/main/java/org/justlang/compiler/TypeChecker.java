@@ -312,18 +312,30 @@ public final class TypeChecker implements TypeCheckerStrategy {
                 if (!checkBlock(ifStmt.thenBranch(), thenLocals, structs, enums, functions, expectedReturn, diagnostics)) {
                     success = false;
                 }
+                boolean thenFallsThrough = blockFallsThrough(ifStmt.thenBranch());
                 if (ifStmt.elseBranch() != null) {
                     TypeEnvironment elseLocals = locals.fork();
                     if (!checkBlock(ifStmt.elseBranch(), elseLocals, structs, enums, functions, expectedReturn, diagnostics)) {
                         success = false;
                     }
-                    locals.joinMovedFrom(thenLocals, elseLocals);
-                    if (!locals.joinTypesFromStrict(thenLocals, elseLocals, diagnostics::addError)) {
-                        success = false;
+                    boolean elseFallsThrough = blockFallsThrough(ifStmt.elseBranch());
+                    if (thenFallsThrough && elseFallsThrough) {
+                        locals.joinMovedFrom(thenLocals, elseLocals);
+                        if (!locals.joinTypesFromStrict(thenLocals, elseLocals, diagnostics::addError)) {
+                            success = false;
+                        }
+                    } else if (thenFallsThrough) {
+                        locals.adoptMovedFrom(thenLocals);
+                        locals.adoptTypesFrom(thenLocals);
+                    } else if (elseFallsThrough) {
+                        locals.adoptMovedFrom(elseLocals);
+                        locals.adoptTypesFrom(elseLocals);
                     }
                 } else {
-                    locals.mergeMovedFrom(thenLocals);
-                    locals.mergeTypesFrom(thenLocals);
+                    if (thenFallsThrough) {
+                        locals.mergeMovedFrom(thenLocals);
+                        locals.mergeTypesFrom(thenLocals);
+                    }
                 }
                 continue;
             }
@@ -402,19 +414,19 @@ public final class TypeChecker implements TypeCheckerStrategy {
                         diagnostics.addError("return with value in void function");
                         success = false;
                     }
-                    continue;
+                    break;
                 }
                 if (returnStmt.expr() == null) {
                     diagnostics.addError("return without value in non-void function");
                     success = false;
-                    continue;
+                    break;
                 }
                 TypeId exprType = inferExpr(returnStmt.expr(), locals, structs, enums, functions, diagnostics);
                 if (!isAssignable(expectedReturn, exprType)) {
                     diagnostics.addError("return type mismatch: expected " + expectedReturn + " got " + exprType);
                     success = false;
                 }
-                continue;
+                break;
             }
             diagnostics.addError("Unsupported statement: " + stmt.getClass().getSimpleName());
             success = false;
@@ -445,6 +457,34 @@ public final class TypeChecker implements TypeCheckerStrategy {
             }
         }
         return false;
+    }
+
+    private boolean blockFallsThrough(List<AstStmt> statements) {
+        for (AstStmt stmt : statements) {
+            if (!statementFallsThrough(stmt)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean statementFallsThrough(AstStmt stmt) {
+        if (stmt instanceof AstReturnStmt || stmt instanceof AstBreakStmt || stmt instanceof AstContinueStmt) {
+            return false;
+        }
+        if (stmt instanceof AstIfStmt ifStmt) {
+            if (ifStmt.elseBranch() == null) {
+                return true;
+            }
+            return blockFallsThrough(ifStmt.thenBranch()) || blockFallsThrough(ifStmt.elseBranch());
+        }
+        if (stmt instanceof AstIfLetStmt ifLetStmt) {
+            if (ifLetStmt.elseBranch() == null) {
+                return true;
+            }
+            return blockFallsThrough(ifLetStmt.thenBranch()) || blockFallsThrough(ifLetStmt.elseBranch());
+        }
+        return true;
     }
 
     private boolean registerPersistentBorrow(String bindingName, AstExpr initializer, TypeEnvironment locals, TypeEnvironment diagnostics) {
@@ -525,18 +565,30 @@ public final class TypeChecker implements TypeCheckerStrategy {
             }
         }
         boolean success = checkBlock(ifLetStmt.thenBranch(), thenLocals, structs, enums, functions, expectedReturn, diagnostics);
+        boolean thenFallsThrough = blockFallsThrough(ifLetStmt.thenBranch());
         if (ifLetStmt.elseBranch() != null) {
             TypeEnvironment elseLocals = locals.fork();
             if (!checkBlock(ifLetStmt.elseBranch(), elseLocals, structs, enums, functions, expectedReturn, diagnostics)) {
                 success = false;
             }
-            locals.joinMovedFrom(thenLocals, elseLocals);
-            if (!locals.joinTypesFromStrict(thenLocals, elseLocals, diagnostics::addError)) {
-                success = false;
+            boolean elseFallsThrough = blockFallsThrough(ifLetStmt.elseBranch());
+            if (thenFallsThrough && elseFallsThrough) {
+                locals.joinMovedFrom(thenLocals, elseLocals);
+                if (!locals.joinTypesFromStrict(thenLocals, elseLocals, diagnostics::addError)) {
+                    success = false;
+                }
+            } else if (thenFallsThrough) {
+                locals.adoptMovedFrom(thenLocals);
+                locals.adoptTypesFrom(thenLocals);
+            } else if (elseFallsThrough) {
+                locals.adoptMovedFrom(elseLocals);
+                locals.adoptTypesFrom(elseLocals);
             }
         } else {
-            locals.mergeMovedFrom(thenLocals);
-            locals.mergeTypesFrom(thenLocals);
+            if (thenFallsThrough) {
+                locals.mergeMovedFrom(thenLocals);
+                locals.mergeTypesFrom(thenLocals);
+            }
         }
         return success;
     }
@@ -869,20 +921,41 @@ public final class TypeChecker implements TypeCheckerStrategy {
 
     private TypeId inferCall(AstCallExpr callExpr, TypeEnvironment locals, StructRegistry structs, EnumRegistry enums, FunctionRegistry functions, TypeEnvironment diagnostics) {
         if (isPrintCall(callExpr)) {
-            if (callExpr.args().size() != 1) {
-                diagnostics.addError("print expects exactly one argument");
+            if (callExpr.args().isEmpty()) {
+                diagnostics.addError("print expects at least one argument");
                 return TypeId.UNKNOWN;
             }
-            TypeId argType = inferExpr(callExpr.args().get(0), locals, structs, enums, functions, diagnostics);
-            if (!argType.isPrintable()) {
-                diagnostics.addError("print does not support type: " + argType);
+            if (callExpr.args().size() > 2) {
+                diagnostics.addError("print supports at most a format string and one value");
+                return TypeId.UNKNOWN;
+            }
+
+            TypeId firstType = inferExpr(callExpr.args().get(0), locals, structs, enums, functions, diagnostics);
+            if (callExpr.args().size() == 1) {
+                if (!firstType.isPrintable()) {
+                    diagnostics.addError("print does not support type: " + firstType);
+                    return TypeId.UNKNOWN;
+                }
+                return TypeId.VOID;
+            }
+
+            if (firstType != TypeId.STRING) {
+                diagnostics.addError("formatted print requires first argument to be String");
+                return TypeId.UNKNOWN;
+            }
+
+            TypeId valueType = inferExpr(callExpr.args().get(1), locals, structs, enums, functions, diagnostics);
+            if (!valueType.isPrintable()) {
+                diagnostics.addError("print does not support type: " + valueType);
                 return TypeId.UNKNOWN;
             }
             return TypeId.VOID;
         }
 
-        if (callExpr.callee().size() == 2) {
-            FunctionRegistry.FunctionSig qualifiedFunction = resolveQualifiedFunction(callExpr, functions, diagnostics);
+        if (callExpr.callee().size() >= 2) {
+            String moduleName = String.join("::", callExpr.callee().subList(0, callExpr.callee().size() - 1));
+            String symbolName = callExpr.callee().get(callExpr.callee().size() - 1);
+            FunctionRegistry.FunctionSig qualifiedFunction = resolveQualifiedFunction(moduleName, symbolName, functions, diagnostics);
             if (qualifiedFunction != null) {
                 return inferFunctionCallArgs(callExpr, qualifiedFunction, locals, structs, enums, functions, diagnostics);
             }
@@ -1034,14 +1107,17 @@ public final class TypeChecker implements TypeCheckerStrategy {
     }
 
     private FunctionRegistry.FunctionSig resolveQualifiedFunction(
-        AstCallExpr callExpr,
+        String moduleName,
+        String symbolName,
         FunctionRegistry functions,
         TypeEnvironment diagnostics
     ) {
-        String moduleName = callExpr.callee().get(0);
-        String symbolName = callExpr.callee().get(1);
         FunctionRegistry.FunctionSig sig = functions.find(symbolName);
-        if (sig == null || !moduleName.equals(sig.moduleName())) {
+        if (sig == null) {
+            return null;
+        }
+        String normalizedModule = normalizeModuleName(moduleName);
+        if (!moduleName.equals(sig.moduleName()) && !normalizedModule.equals(sig.moduleName())) {
             return null;
         }
         if (!isFunctionVisible(sig, true, diagnostics)) {
@@ -1062,12 +1138,12 @@ public final class TypeChecker implements TypeCheckerStrategy {
 
         String aliasTarget = currentUseAliases.get(functionName);
         if (aliasTarget != null) {
-            int separator = aliasTarget.indexOf("::");
+            int separator = aliasTarget.lastIndexOf("::");
             if (separator < 0) {
                 diagnostics.addError("Invalid use target for alias '" + functionName + "': " + aliasTarget);
                 return null;
             }
-            String moduleName = aliasTarget.substring(0, separator);
+            String moduleName = normalizeModuleName(aliasTarget.substring(0, separator));
             String symbolName = aliasTarget.substring(separator + 2);
             FunctionRegistry.FunctionSig aliased = functions.find(symbolName);
             if (aliased == null || !moduleName.equals(aliased.moduleName())) {
@@ -1268,6 +1344,22 @@ public final class TypeChecker implements TypeCheckerStrategy {
         return base.replace('-', '_');
     }
 
+    private String normalizeModuleName(String moduleName) {
+        String normalized = moduleName;
+        if (normalized.startsWith("crate::")) {
+            normalized = normalized.substring("crate::".length());
+        } else if (normalized.startsWith("self::")) {
+            normalized = normalized.substring("self::".length());
+        } else if (normalized.startsWith("super::")) {
+            normalized = normalized.substring("super::".length());
+        }
+        int lastSeparator = normalized.lastIndexOf("::");
+        if (lastSeparator >= 0 && lastSeparator + 2 < normalized.length()) {
+            return normalized.substring(lastSeparator + 2);
+        }
+        return normalized;
+    }
+
     private void registerBuiltinEnums(EnumRegistry enums) {
         List<AstEnumVariant> optionVariants = List.of(
             new AstEnumVariant("Some", "Any"),
@@ -1377,11 +1469,12 @@ public final class TypeChecker implements TypeCheckerStrategy {
 
     private boolean isPrintCall(AstCallExpr callExpr) {
         if (callExpr.callee().size() == 1) {
-            return "print".equals(callExpr.callee().get(0));
+            String name = callExpr.callee().get(0);
+            return "print".equals(name) || "println".equals(name);
         }
         return callExpr.callee().size() == 2
             && "std".equals(callExpr.callee().get(0))
-            && "print".equals(callExpr.callee().get(1));
+            && ("print".equals(callExpr.callee().get(1)) || "println".equals(callExpr.callee().get(1)));
     }
 
     private boolean checkBreak(AstBreakStmt breakStmt, TypeEnvironment locals, StructRegistry structs, EnumRegistry enums, FunctionRegistry functions, TypeEnvironment diagnostics) {

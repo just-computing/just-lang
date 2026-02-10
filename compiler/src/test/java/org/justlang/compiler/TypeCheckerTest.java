@@ -314,6 +314,79 @@ public class TypeCheckerTest {
     }
 
     @Test
+    void groupedUseParsesSuccessfully() {
+        TypeResult result = typeCheck("""
+            use crate::entities::{Book, Member, LoanRecord};
+            use std::collections::{HashMap, VecDeque};
+
+            fn main() {
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void rustStyleTrailingCommasAndPubFieldsAreAccepted() {
+        TypeResult result = typeCheck("""
+            struct Boxed {
+                pub value: i32,
+            }
+
+            fn id(x: i32,) -> i32 {
+                return x;
+            }
+
+            fn main() {
+                let boxed = Boxed {
+                    value: id(1,),
+                };
+                println!("{}", boxed.value);
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void printlnMacroIsAccepted() {
+        TypeResult result = typeCheck("""
+            #[allow(dead_code)]
+            fn helper() {
+                return;
+            }
+
+            fn main() {
+                println!(42);
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
+    }
+
+    @Test
+    void tryOperatorReportsExplicitUnsupportedDiagnostic() {
+        String source = """
+            fn main() {
+                let value = Option::Some(1)?;
+                std::print(value);
+                return;
+            }
+            """;
+        Diagnostics diagnostics = new Diagnostics();
+        SourceFile sourceFile = new SourceFile(Path.of("test.rs"), source);
+        Lexer lexer = new Lexer();
+        Parser parser = new Parser();
+        var tokens = lexer.lex(sourceFile, diagnostics);
+
+        ParseException error = assertThrows(ParseException.class, () -> parser.parse(sourceFile, tokens, diagnostics));
+        assertTrue(error.getMessage().contains("Try operator '?' is not supported yet"));
+    }
+
+    @Test
     void duplicateFunctionFails() {
         TypeResult result = typeCheck("""
             fn main() { return; }
@@ -1070,13 +1143,38 @@ public class TypeCheckerTest {
     void printArityValidation() {
         TypeResult result = typeCheck("""
             fn main() {
+                std::print("{}", 1, 2);
+                return;
+            }
+            """);
+
+        assertFalse(result.success(), "expected type check to fail");
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("print supports at most a format string and one value")));
+    }
+
+    @Test
+    void formattedPrintRequiresStringTemplate() {
+        TypeResult result = typeCheck("""
+            fn main() {
                 std::print(1, 2);
                 return;
             }
             """);
 
         assertFalse(result.success(), "expected type check to fail");
-        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("print expects exactly one argument")));
+        assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("formatted print requires first argument to be String")));
+    }
+
+    @Test
+    void formattedPrintIsAccepted() {
+        TypeResult result = typeCheck("""
+            fn main() {
+                println!("{}", 42);
+                return;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
     }
 
     @Test
@@ -1864,6 +1962,22 @@ public class TypeCheckerTest {
 
         assertFalse(result.success(), "expected type check to fail");
         assertTrue(result.environment().errors().stream().anyMatch(err -> err.contains("Use of moved value: item")));
+    }
+
+    @Test
+    void moveInNonFallthroughIfBranchDoesNotPropagate() {
+        TypeResult result = typeCheck("""
+            struct Item { value: i32 }
+
+            fn pick(item: Item, flag: bool) -> Item {
+                if flag {
+                    return Item { value: item.value };
+                }
+                return item;
+            }
+            """);
+
+        assertTrue(result.success(), "expected type check to succeed");
     }
 
     @Test

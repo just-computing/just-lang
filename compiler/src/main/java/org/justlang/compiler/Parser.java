@@ -9,6 +9,7 @@ public final class Parser implements ParserStrategy {
     private boolean allowStructInit = true;
     private Diagnostics diagnostics;
     private SourceFile sourceFile;
+    private final List<AstItem> pendingItems = new ArrayList<>();
 
     @Override
     public AstModule parse(SourceFile sourceFile, List<Token> tokens, Diagnostics diagnostics) {
@@ -16,8 +17,17 @@ public final class Parser implements ParserStrategy {
         this.diagnostics = diagnostics;
         this.tokens = tokens;
         this.current = 0;
+        this.pendingItems.clear();
         List<AstItem> items = new ArrayList<>();
-        while (!isAtEnd()) {
+        while (!isAtEnd() || !pendingItems.isEmpty()) {
+            if (!pendingItems.isEmpty()) {
+                items.add(pendingItems.remove(0));
+                continue;
+            }
+            skipOuterAttributes();
+            if (isAtEnd()) {
+                break;
+            }
             items.add(parseItem());
         }
         return new AstModule(items);
@@ -49,7 +59,14 @@ public final class Parser implements ParserStrategy {
             return parseMod();
         }
         if (matchKeyword("use")) {
-            return parseUse();
+            List<AstUse> useItems = parseUseItems();
+            if (useItems.isEmpty()) {
+                throw error(previous(), "Expected at least one use target");
+            }
+            for (int i = 1; i < useItems.size(); i++) {
+                pendingItems.add(useItems.get(i));
+            }
+            return useItems.get(0);
         }
         if (matchKeyword("import")) {
             return parseImport();
@@ -68,13 +85,19 @@ public final class Parser implements ParserStrategy {
         expectSymbol("(");
         List<AstParam> params = new ArrayList<>();
         if (!checkSymbol(")")) {
-            do {
+            while (true) {
                 boolean mutable = matchKeyword("mut");
                 Token paramName = expect(Token.TokenKind.IDENT, "Expected parameter name");
                 expectSymbol(":");
                 String paramType = parseTypeName();
                 params.add(new AstParam(paramName.lexeme(), paramType, mutable));
-            } while (matchSymbol(","));
+                if (!matchSymbol(",")) {
+                    break;
+                }
+                if (checkSymbol(")")) {
+                    break;
+                }
+            }
         }
         expectSymbol(")");
         String returnType = null;
@@ -91,20 +114,54 @@ public final class Parser implements ParserStrategy {
         return new AstImport(String.join("/", path) + ".just");
     }
 
-    private AstUse parseUse() {
-        List<String> path = parsePath();
-        if (path.size() < 2) {
+    private List<AstUse> parseUseItems() {
+        List<String> basePath = parsePath();
+        List<AstUse> items = new ArrayList<>();
+
+        if (checkSymbol(":") && current + 2 < tokens.size()
+            && ":".equals(tokens.get(current + 1).lexeme())
+            && "{".equals(tokens.get(current + 2).lexeme())) {
+            advance();
+            advance();
+            expectSymbol("{");
+            String module = String.join("::", basePath);
+            if (module.isBlank()) {
+                throw error(previous(), "use group requires a module path");
+            }
+            do {
+                Token symbolToken = expect(Token.TokenKind.IDENT, "Expected symbol name in grouped use");
+                String symbol = symbolToken.lexeme();
+                String alias = symbol;
+                if (matchKeyword("as")) {
+                    Token aliasToken = expect(Token.TokenKind.IDENT, "Expected alias after 'as'");
+                    alias = aliasToken.lexeme();
+                }
+                items.add(new AstUse(module, symbol, alias, sourceFile.path()));
+                if (!matchSymbol(",")) {
+                    break;
+                }
+                if (checkSymbol("}")) {
+                    break;
+                }
+            } while (true);
+            expectSymbol("}");
+            expectSymbol(";");
+            return items;
+        }
+
+        if (basePath.size() < 2) {
             throw error(previous(), "use requires a module and symbol (e.g., use util::helper;)");
         }
-        String symbol = path.get(path.size() - 1);
-        String module = String.join("::", path.subList(0, path.size() - 1));
+        String symbol = basePath.get(basePath.size() - 1);
+        String module = String.join("::", basePath.subList(0, basePath.size() - 1));
         String alias = symbol;
         if (matchKeyword("as")) {
             Token aliasToken = expect(Token.TokenKind.IDENT, "Expected alias after 'as'");
             alias = aliasToken.lexeme();
         }
         expectSymbol(";");
-        return new AstUse(module, symbol, alias, sourceFile.path());
+        items.add(new AstUse(module, symbol, alias, sourceFile.path()));
+        return items;
     }
 
     private AstStmt parseStatement() {
@@ -308,6 +365,9 @@ public final class Parser implements ParserStrategy {
             Token field = expect(Token.TokenKind.IDENT, "Expected field name after '.'");
             expr = new AstFieldAccessExpr(expr, field.lexeme());
         }
+        if (matchSymbol("?")) {
+            throw error(previous(), "Try operator '?' is not supported yet");
+        }
         return expr;
     }
 
@@ -335,15 +395,38 @@ public final class Parser implements ParserStrategy {
         }
         if (check(Token.TokenKind.IDENT)) {
             List<String> path = parsePath();
+            if (matchSymbol("!")) {
+                expectSymbol("(");
+                List<AstExpr> args = new ArrayList<>();
+                if (!checkSymbol(")")) {
+                    while (true) {
+                        args.add(parseExpr());
+                        if (!matchSymbol(",")) {
+                            break;
+                        }
+                        if (checkSymbol(")")) {
+                            break;
+                        }
+                    }
+                }
+                expectSymbol(")");
+                return new AstCallExpr(path, args);
+            }
             if (allowStructInit && path.size() == 1 && matchSymbol("{")) {
                 List<AstFieldInit> fields = new ArrayList<>();
                 if (!checkSymbol("}")) {
-                    do {
+                    while (true) {
                         Token fieldName = expect(Token.TokenKind.IDENT, "Expected field name");
                         expectSymbol(":");
                         AstExpr value = parseExpr();
                         fields.add(new AstFieldInit(fieldName.lexeme(), value));
-                    } while (matchSymbol(","));
+                        if (!matchSymbol(",")) {
+                            break;
+                        }
+                        if (checkSymbol("}")) {
+                            break;
+                        }
+                    }
                 }
                 expectSymbol("}");
                 return new AstStructInitExpr(path.get(0), fields);
@@ -351,9 +434,15 @@ public final class Parser implements ParserStrategy {
             if (matchSymbol("(")) {
                 List<AstExpr> args = new ArrayList<>();
                 if (!checkSymbol(")")) {
-                    do {
+                    while (true) {
                         args.add(parseExpr());
-                    } while (matchSymbol(","));
+                        if (!matchSymbol(",")) {
+                            break;
+                        }
+                        if (checkSymbol(")")) {
+                            break;
+                        }
+                    }
                 }
                 expectSymbol(")");
                 return new AstCallExpr(path, args);
@@ -369,6 +458,27 @@ public final class Parser implements ParserStrategy {
             return expr;
         }
         throw error(peek(), "Expected expression");
+    }
+
+    private void skipOuterAttributes() {
+        while (matchSymbol("#")) {
+            expectSymbol("[");
+            int depth = 1;
+            while (depth > 0) {
+                if (isAtEnd()) {
+                    throw error(previous(), "Unterminated attribute");
+                }
+                if (matchSymbol("[")) {
+                    depth++;
+                    continue;
+                }
+                if (matchSymbol("]")) {
+                    depth--;
+                    continue;
+                }
+                advance();
+            }
+        }
     }
 
     private List<AstStmt> parseBlock() {
@@ -639,6 +749,7 @@ public final class Parser implements ParserStrategy {
         expectSymbol("{");
         List<AstField> fields = new ArrayList<>();
         while (!checkSymbol("}") && !isAtEnd()) {
+            matchKeyword("pub");
             Token fieldName = expect(Token.TokenKind.IDENT, "Expected field name");
             expectSymbol(":");
             String fieldType = parseTypeName();
@@ -675,7 +786,7 @@ public final class Parser implements ParserStrategy {
         List<String> segments = new ArrayList<>();
         Token first = expect(Token.TokenKind.IDENT, "Expected identifier");
         segments.add(first.lexeme());
-        while (matchDoubleColon()) {
+        while (matchDoubleColonPath()) {
             Token segment = expect(Token.TokenKind.IDENT, "Expected identifier after '::'");
             segments.add(segment.lexeme());
         }
@@ -693,9 +804,15 @@ public final class Parser implements ParserStrategy {
             String base = String.join("::", path);
             if (matchSymbol("<")) {
                 List<String> typeArgs = new ArrayList<>();
-                do {
+                while (true) {
                     typeArgs.add(parseTypeName());
-                } while (matchSymbol(","));
+                    if (!matchSymbol(",")) {
+                        break;
+                    }
+                    if (checkSymbol(">")) {
+                        break;
+                    }
+                }
                 expectSymbol(">");
                 return base + "<" + String.join(", ", typeArgs) + ">";
             }
@@ -748,14 +865,17 @@ public final class Parser implements ParserStrategy {
         return peek().kind() == kind;
     }
 
-    private boolean matchDoubleColon() {
+    private boolean matchDoubleColonPath() {
         if (!checkSymbol(":")) {
             return false;
         }
-        if (current + 1 >= tokens.size()) {
+        if (current + 2 >= tokens.size()) {
             return false;
         }
         if (!tokens.get(current + 1).lexeme().equals(":")) {
+            return false;
+        }
+        if (tokens.get(current + 2).kind() != Token.TokenKind.IDENT) {
             return false;
         }
         advance();

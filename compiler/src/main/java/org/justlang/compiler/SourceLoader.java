@@ -26,7 +26,7 @@ public final class SourceLoader {
 
         try (Stream<Path> paths = Files.walk(root)) {
             paths.filter(Files::isRegularFile)
-                .filter(path -> path.toString().endsWith(".just"))
+                .filter(this::isSupportedSourceFile)
                 .forEach(path -> sources.add(read(path)));
         } catch (IOException error) {
             throw new RuntimeException("Failed to scan sources under " + root, error);
@@ -124,13 +124,17 @@ public final class SourceLoader {
             }
             Matcher modMatcher = MOD_PATTERN.matcher(trimmed);
             if (modMatcher.matches()) {
-                imports.add(modMatcher.group(1).replace("::", "/") + ".just");
+                imports.add("mod:" + modMatcher.group(1));
             }
         }
         return imports;
     }
 
     private Path resolveImportPath(Path currentFile, String importPath, Map<String, Path> dependencyRoots) {
+        if (importPath.startsWith("mod:")) {
+            String modulePath = importPath.substring("mod:".length());
+            return resolveModulePath(currentFile, modulePath);
+        }
         if (importPath.startsWith("@")) {
             int slash = importPath.indexOf('/');
             String alias = slash > 0 ? importPath.substring(1, slash) : importPath.substring(1);
@@ -145,6 +149,41 @@ public final class SourceLoader {
             return root.resolve(relative).normalize();
         }
         return currentFile.getParent().resolve(importPath).normalize();
+    }
+
+    private Path resolveModulePath(Path currentFile, String modulePath) {
+        String relative = modulePath.replace("::", "/");
+        Path baseDir = currentFile.getParent();
+        String preferredExt = sourceExtension(currentFile);
+        String fallbackExt = ".rs".equals(preferredExt) ? ".just" : ".rs";
+
+        List<Path> candidates = List.of(
+            baseDir.resolve(relative + preferredExt),
+            baseDir.resolve(relative + fallbackExt),
+            baseDir.resolve(relative).resolve("mod" + preferredExt),
+            baseDir.resolve(relative).resolve("mod" + fallbackExt)
+        );
+
+        for (Path candidate : candidates) {
+            if (Files.exists(candidate)) {
+                return candidate.normalize();
+            }
+        }
+
+        return baseDir.resolve(relative + preferredExt).normalize();
+    }
+
+    private String sourceExtension(Path path) {
+        String fileName = path.getFileName().toString();
+        if (fileName.endsWith(".rs")) {
+            return ".rs";
+        }
+        return ".just";
+    }
+
+    private boolean isSupportedSourceFile(Path path) {
+        String fileName = path.getFileName().toString();
+        return fileName.endsWith(".just") || fileName.endsWith(".rs");
     }
 
     private String formatCycle(Path repeatedPath, Deque<Path> stack) {

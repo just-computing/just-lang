@@ -44,7 +44,7 @@ public final class JustCompiler {
         }
 
         if (sources.isEmpty()) {
-            diagnostics.report(new Diagnostic("No .just sources found.", inputPath));
+            diagnostics.report(new Diagnostic("No .just or .rs sources found.", inputPath));
             return new CompileResult(false, diagnostics.all());
         }
 

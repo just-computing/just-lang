@@ -961,12 +961,16 @@ public final class Codegen implements CodegenStrategy {
 
     private ExprValue emitCall(MethodVisitor mv, AstCallExpr call, LocalState locals) {
         if (!isPrintCall(call)) {
-            if (call.callee().size() == 2) {
-                FunctionInfo qualified = resolveQualifiedFunction(call.callee().get(0), call.callee().get(1));
+            if (call.callee().size() >= 2) {
+                String moduleName = String.join("::", call.callee().subList(0, call.callee().size() - 1));
+                String symbolName = call.callee().get(call.callee().size() - 1);
+                FunctionInfo qualified = resolveQualifiedFunction(moduleName, symbolName);
                 if (qualified != null) {
                     return emitFunctionCall(mv, call, locals, qualified, String.join("::", call.callee()));
                 }
-                return emitEnumCall(mv, call, locals);
+                if (call.callee().size() == 2) {
+                    return emitEnumCall(mv, call, locals);
+                }
             }
             if (call.callee().size() != 1) {
                 throw new IllegalStateException("Only direct function calls are supported");
@@ -978,22 +982,45 @@ public final class Codegen implements CodegenStrategy {
             }
             return emitFunctionCall(mv, call, locals, info, lookup);
         }
-        if (call.args().size() != 1) {
-            throw new IllegalStateException("print expects exactly one argument");
+        if (call.args().isEmpty()) {
+            throw new IllegalStateException("print expects at least one argument");
         }
+        if (call.args().size() > 2) {
+            throw new IllegalStateException("print supports at most a format string and one value");
+        }
+        String methodName = "println";
         mv.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
-        ExprValue arg = emitExpr(mv, call.args().get(0), locals);
-        if (arg.kind() == ValueKind.STRING) {
-            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
-        } else if (arg.kind() == ValueKind.INT) {
-            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(I)V", false);
-        } else if (arg.kind() == ValueKind.BOOL) {
-            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Z)V", false);
-        } else if (arg.kind() == ValueKind.STRUCT || arg.kind() == ValueKind.ENUM || arg.kind() == ValueKind.ANY) {
-            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/Object;)V", false);
-        } else {
-            throw new IllegalStateException("Unsupported print argument type: " + arg.kind());
+        if (call.args().size() == 1) {
+            ExprValue arg = emitExpr(mv, call.args().get(0), locals);
+            if (arg.kind() == ValueKind.STRING) {
+                mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", methodName, "(Ljava/lang/String;)V", false);
+            } else if (arg.kind() == ValueKind.INT) {
+                mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", methodName, "(I)V", false);
+            } else if (arg.kind() == ValueKind.BOOL) {
+                mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", methodName, "(Z)V", false);
+            } else if (arg.kind() == ValueKind.STRUCT || arg.kind() == ValueKind.ENUM || arg.kind() == ValueKind.ANY) {
+                mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", methodName, "(Ljava/lang/Object;)V", false);
+            } else {
+                throw new IllegalStateException("Unsupported print argument type: " + arg.kind());
+            }
+            return ExprValue.of(ValueKind.VOID);
         }
+
+        ExprValue formatArg = emitExpr(mv, call.args().get(0), locals);
+        if (formatArg.kind() != ValueKind.STRING) {
+            throw new IllegalStateException("formatted print requires first argument to be String");
+        }
+        mv.visitLdcInsn("{}");
+        ExprValue valueArg = emitExpr(mv, call.args().get(1), locals);
+        emitStringValue(mv, valueArg);
+        mv.visitMethodInsn(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/String",
+            "replace",
+            "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Ljava/lang/String;",
+            false
+        );
+        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", methodName, "(Ljava/lang/String;)V", false);
         return ExprValue.of(ValueKind.VOID);
     }
 
@@ -1024,7 +1051,8 @@ public final class Codegen implements CodegenStrategy {
         if (info == null) {
             return null;
         }
-        if (!moduleName.equals(info.moduleName())) {
+        String normalizedModule = normalizeModuleName(moduleName);
+        if (!moduleName.equals(info.moduleName()) && !normalizedModule.equals(info.moduleName())) {
             return null;
         }
         return info;
@@ -1036,8 +1064,16 @@ public final class Codegen implements CodegenStrategy {
             return local;
         }
         if (local != null && currentUseAliases.containsKey(symbolName)) {
-            String expected = currentUseAliases.get(symbolName);
-            if (expected.equals(local.moduleName() + "::" + local.name())) {
+            String aliasTarget = currentUseAliases.get(symbolName);
+            int separator = aliasTarget.lastIndexOf("::");
+            if (separator >= 0) {
+                String aliasModule = normalizeModuleName(aliasTarget.substring(0, separator));
+                String aliasSymbol = aliasTarget.substring(separator + 2);
+                if (aliasSymbol.equals(local.name()) && aliasModule.equals(local.moduleName())) {
+                    return local;
+                }
+            }
+            if (aliasTarget.equals(local.moduleName() + "::" + local.name())) {
                 return local;
             }
         }
@@ -1444,10 +1480,38 @@ public final class Codegen implements CodegenStrategy {
 
     private boolean isPrintCall(AstCallExpr call) {
         List<String> callee = call.callee();
-        if (callee.size() == 1 && "print".equals(callee.get(0))) {
-            return true;
+        if (callee.size() == 1) {
+            String name = callee.get(0);
+            return "print".equals(name) || "println".equals(name);
         }
-        return callee.size() == 2 && "std".equals(callee.get(0)) && "print".equals(callee.get(1));
+        return callee.size() == 2
+            && "std".equals(callee.get(0))
+            && ("print".equals(callee.get(1)) || "println".equals(callee.get(1)));
+    }
+
+    private void emitStringValue(MethodVisitor mv, ExprValue value) {
+        if (value.kind() == ValueKind.STRING) {
+            return;
+        }
+        if (value.kind() == ValueKind.INT) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/String", "valueOf", "(I)Ljava/lang/String;", false);
+            return;
+        }
+        if (value.kind() == ValueKind.BOOL) {
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/String", "valueOf", "(Z)Ljava/lang/String;", false);
+            return;
+        }
+        if (value.kind() == ValueKind.STRUCT || value.kind() == ValueKind.ENUM || value.kind() == ValueKind.ANY) {
+            mv.visitMethodInsn(
+                Opcodes.INVOKESTATIC,
+                "java/lang/String",
+                "valueOf",
+                "(Ljava/lang/Object;)Ljava/lang/String;",
+                false
+            );
+            return;
+        }
+        throw new IllegalStateException("Unsupported print argument type: " + value.kind());
     }
 
     private AstFunction findMain(AstModule module) {
@@ -1761,6 +1825,22 @@ public final class Codegen implements CodegenStrategy {
         int dot = fileName.lastIndexOf('.');
         String base = dot > 0 ? fileName.substring(0, dot) : fileName;
         return base.replace('-', '_');
+    }
+
+    private String normalizeModuleName(String moduleName) {
+        String normalized = moduleName;
+        if (normalized.startsWith("crate::")) {
+            normalized = normalized.substring("crate::".length());
+        } else if (normalized.startsWith("self::")) {
+            normalized = normalized.substring("self::".length());
+        } else if (normalized.startsWith("super::")) {
+            normalized = normalized.substring("super::".length());
+        }
+        int lastSeparator = normalized.lastIndexOf("::");
+        if (lastSeparator >= 0 && lastSeparator + 2 < normalized.length()) {
+            return normalized.substring(lastSeparator + 2);
+        }
+        return normalized;
     }
 
     private ValueKind toValueKind(TypeId type) {
